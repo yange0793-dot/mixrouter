@@ -14,12 +14,14 @@ const os = require('os');
 
 const VERSION = '2.1.0';
 const ROOT = __dirname;
+// 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
+const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
 const PROXY_PORT = Number(process.env.MIXROUTER_PORT || 8787);
 const UI_PORT = Number(process.env.MIXUI_PORT || 8788);
 const HOST = '127.0.0.1';
-const PROVIDERS_FILE = path.join(ROOT, 'providers.json');
-const ROUTES_FILE = path.join(ROOT, 'routes.json');
-const LOG_FILE = path.join(ROOT, 'logs', 'requests.jsonl');
+const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
+const ROUTES_FILE = path.join(DATA_DIR, 'routes.json');
+const LOG_FILE = path.join(DATA_DIR, 'logs', 'requests.jsonl');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const BODY_LIMIT = 64 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 600 * 1000;
@@ -33,8 +35,6 @@ const BACKUP_KEEP = 5;
 // 客户端真实配置(测试时可用环境变量重定向到临时目录)
 const CLAUDE_SETTINGS = process.env.MIXR_CLAUDE_SETTINGS || path.join(os.homedir(), '.claude', 'settings.json');
 const CODEX_CONFIG = process.env.MIXR_CODEX_CONFIG || path.join(os.homedir(), '.codex', 'config.toml');
-
-process.title = 'mixrouter';
 
 // ---------------------------------------------------------------- 配置存取
 function loadJson(file, fallback) {
@@ -208,7 +208,7 @@ function proxyHandler(req, res) {
           entry.ms = Date.now() - started;
           const text = Buffer.concat(parts).toString('utf8');
           const u = extractUsage(text); entry.in = u.in; entry.out = u.out; entry.cache_read = u.cache_read;
-          if (isCount) entry.in = (text.match(/"input_tokens"\s*:\s*(\d+)/) || [0, 0])[1];
+          if (isCount) entry.in = Number((text.match(/"input_tokens"\s*:\s*(\d+)/) || [0, 0])[1]);
           logRequest(entry); res.end();
         });
       }
@@ -510,12 +510,28 @@ function listen(port, handler, label) {
     srv.listen(port, HOST, () => ok(srv));
   });
 }
-Promise.all([listen(PROXY_PORT, proxyHandler, 'proxy'), listen(UI_PORT, apiHandler, 'ui')]).then(() => {
-  console.log(`[mixrouter v${VERSION}] 代理 :${PROXY_PORT}  控制台 http://${HOST}:${UI_PORT}  渠道 claude ${store.claude.length} / codex ${store.codex.length}`);
-}).catch(e => {
-  console.error(`启动失败: ${e.message}(端口 ${PROXY_PORT}/${UI_PORT} 是否被占用?)`);
-  process.exit(1);
-});
-// 长驻进程兜底:单次请求内的意外异常只记日志,不退出
-process.on('uncaughtException', e => console.error(`[uncaught] ${new Date().toISOString()} ${e.stack || e}`));
-process.on('unhandledRejection', e => console.error(`[unhandled] ${new Date().toISOString()} ${e && (e.stack || e.message) || e}`));
+// 被测试 require 时不自动起服务、不吞异常;只有直接运行才进入常驻模式
+if (require.main === module) {
+  process.title = 'mixrouter';
+  Promise.all([listen(PROXY_PORT, proxyHandler, 'proxy'), listen(UI_PORT, apiHandler, 'ui')]).then(() => {
+    console.log(`[mixrouter v${VERSION}] 代理 :${PROXY_PORT}  控制台 http://${HOST}:${UI_PORT}  渠道 claude ${store.claude.length} / codex ${store.codex.length}`);
+  }).catch(e => {
+    console.error(`启动失败: ${e.message}(端口 ${PROXY_PORT}/${UI_PORT} 是否被占用?)`);
+    process.exit(1);
+  });
+  // 长驻进程兜底:单次请求内的意外异常只记日志,不退出
+  process.on('uncaughtException', e => console.error(`[uncaught] ${new Date().toISOString()} ${e.stack || e}`));
+  process.on('unhandledRejection', e => console.error(`[unhandled] ${new Date().toISOString()} ${e && (e.stack || e.message) || e}`));
+}
+
+// 供测试与脚本复用;store/routes/current 经 _state 存取以保持闭包绑定
+module.exports = {
+  VERSION, proxyHandler, apiHandler, listen,
+  resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr,
+  switchClaude, switchCodex, liveState, testProvider,
+  _state: {
+    get store() { return store; }, set store(v) { store = v; },
+    get routes() { return routes; }, set routes(v) { routes = v; },
+    get current() { return current; }, set current(v) { current = v; },
+  },
+};

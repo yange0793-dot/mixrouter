@@ -1,5 +1,9 @@
 # Mixrouter v2.1
 
+[![CI](https://github.com/yange0793-dot/mixrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yange0793-dot/mixrouter/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](package.json)
+
 本地模型路由器 + 客户端配置切换器(2026-09-05 重写,核心是 Anthropic 协议路由代理,其余向 cc-switch 看齐):
 
 - **渠道分 Claude Code / Codex 两组**,自由增删改查,一键「切换」写入客户端真实配置(自动备份,保留原文件其余内容)
@@ -10,11 +14,12 @@
 ├── mixrouter.js              # 核心:零依赖 Node 单进程
 ├── mixctl                    # 管理命令
 ├── public/index.html         # Web 控制台(渠道 / 路由 / 请求日志)
-├── providers.json            # 渠道(含 key,0600,勿提交)
-├── routes.json               # 路由规则
+├── providers.json            # 渠道(含 key,0600,勿提交;模板见 providers.example.json)
+├── routes.json               # 路由规则(本地运行时状态,勿提交;模板见 routes.example.json)
 ├── logs/                     # server.log + requests.jsonl(5MB 轮转)
 ├── scripts/import-ccswitch.js# 从 cc-switch 备份库导入渠道(claude + codex 两组)
-└── test/mock-upstream.js     # 假上游,验证链路用
+├── test/                     # node --test 套件:纯函数单测 + 切换夹具 + 代理全链路集成
+└── .github/workflows/        # CI(Node 18/22/24 矩阵)与 tag 发版(测试不过不发版)
 ```
 
 ## 运行
@@ -69,13 +74,32 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
 
 ## 已验证(2026-09-05,v2.1)
 
-- 代理:非流式/流式转发、模型改写、count_tokens、默认路由兜底、`[1M]` 剥离 + beta 头、
-  请求日志、上游断连返回 Anthropic 风格 502、**https 上游**(对 agentrouter.org 实测,
-  上游 401 原样透传)。
-- 切换:在临时目录夹具上验证——claude 组保留 settings.json 其余键 + 自动备份;
-  codex 组保留用户全部自定义 section、二次切换无重复、live 比对正确;
-  测试全程用 `MIXR_CLAUDE_SETTINGS / MIXR_CODEX_CONFIG` 环境变量重定向,真实配置指纹比对零改动。
-- 控制台静态校验(元素 id / 事件函数 / JS 语法)。
+- **自动化测试 33 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
+  - 纯函数:模型改写与 `[1M]` beta 头合并、header 消洗、SSE/JSON usage 抽取、key 脱敏、TOML 转义、路由解析(优先级/停用/默认兜底)。
+  - 配置切换(夹具经环境变量重定向):claude 组保留 settings.json 其余键 + 自动备份 + 0600;codex 组 mixr-* section 幂等替换、用户自定义 section 一字不动、live 漂移比对。
+  - 代理全链路(mock 上游 + 临时端口):非流式/流式转发、模型改写、鉴权头、UA 兜底、count_tokens、503/502 错误路径、控制台 CRUD 与 key 不出网掩码。
+- 真实环境手测:https 上游(对 agentrouter.org 实测,上游 401 原样透传)。
+
+## 开发
+
+```bash
+npm test                 # node --test test/*.test.js
+```
+
+- 测试不依赖任何安装步骤(零依赖),运行时数据经 `MIXR_DATA_DIR`、
+  `MIXR_CLAUDE_SETTINGS`、`MIXR_CODEX_CONFIG` 环境变量重定向到临时目录,**永不触碰真实配置**。
+- `mixrouter.js` 被 require 时不自动起服务、不注册异常兜底(便于测试);直接 `node mixrouter.js` 才进入常驻模式。
+- 发版:推 `v*` tag → Release 工作流先跑测试,通过后打源码包并创建 GitHub Release。
+
+## Roadmap
+
+- [v2.1.x 稳定性](https://github.com/yange0793-dot/mixrouter/milestone/1):小修快跑
+- [v2.2 路由与可观测性](https://github.com/yange0793-dot/mixrouter/milestone/2):错误码细化、日志结构化查询
+- [v3 Codex 组走代理](https://github.com/yange0793-dot/mixrouter/milestone/3):Codex 渠道经 :8787 统一路由
+
+## License
+
+[MIT](LICENSE)
 
 ## 已知环境坑
 

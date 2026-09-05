@@ -1,13 +1,31 @@
-[
-  {
-    "id": "p1",
-    "name": "示例渠道",
-    "base_url": "https://api.example.com",
-    "api_key": "sk-xxxx",
-    "models": ["claude-opus-5", "claude-opus-5[1M]"],
-    "enabled": true,
-    "ua": "",
-    "note": "复制本文件为 providers.json 后填入真实渠道;模型带 [1M] 后缀 = 自动剥离并加 context-1m beta 头",
-    "created_at": "1970-01-01T00:00:00.000Z"
-  }
-]
+{
+  "version": 2,
+  "current": { "claude": "p1", "codex": null },
+  "claude": [
+    {
+      "id": "p1",
+      "name": "示例渠道",
+      "base_url": "https://api.example.com",
+      "api_key": "sk-xxxx",
+      "models": ["claude-opus-5", "claude-opus-5[1M]"],
+      "slots": { "opus": "", "sonnet": "", "haiku": "" },
+      "enabled": true,
+      "ua": "",
+      "note": "claude 组渠道可作为路由目标;模型带 [1M] 后缀 = 自动剥离并加 context-1m beta 头",
+      "created_at": "1970-01-01T00:00:00.000Z"
+    }
+  ],
+  "codex": [
+    {
+      "id": "c1",
+      "name": "Codex 示例渠道",
+      "base_url": "https://api.example.com",
+      "api_key": "sk-xxxx",
+      "model": "gpt-5-codex",
+      "wire_api": "responses",
+      "enabled": true,
+      "note": "切换后写入 ~/.codex/config.toml(experimental_bearer_token 模式)",
+      "created_at": "1970-01-01T00:00:00.000Z"
+    }
+  ]
+}

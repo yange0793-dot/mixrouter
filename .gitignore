@@ -2,6 +2,10 @@
 providers.json
 providers.json.tmp
 
+# 本地路由规则(运行时状态);用 routes.example.json 作模板
+routes.json
+routes.json.tmp
+
 # 运行时产物
 logs/
 .run/

@@ -1,0 +1,9 @@
+{
+  "rules": [
+    { "id": "r1", "match": "opus, claude-3-opus", "provider": "p1", "model": "claude-opus-5", "enabled": true },
+    { "id": "r2", "match": "sonnet", "provider": "p1", "model": "claude-sonnet-5", "enabled": true },
+    { "id": "r3", "match": "haiku", "provider": "", "model": "", "enabled": true },
+    { "id": "r4", "match": "fable", "provider": "", "model": "", "enabled": true }
+  ],
+  "default": { "provider": "", "model": "" }
+}
