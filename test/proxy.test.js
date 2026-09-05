@@ -245,6 +245,42 @@ test('控制台 API:渠道 CRUD 全流程,key 不出网', async () => {
   assert.ok(![...after.providers.claude, ...after.providers.codex].some(p => p.id === id));
 });
 
+test('日志过滤与统计聚合', async () => {
+  // 造一条失败记录
+  mod._state.store.claude.push({ id: 'pdown', name: '死渠道', base_url: 'http://127.0.0.1:1', api_key: 'sk-x', enabled: true });
+  routesBackup.push(mod._state.routes);
+  mod._state.routes = { rules: [{ id: 'rd', match: 'downmodel', provider: 'pdown', model: '', enabled: true }],
+    default: { provider: 'p1', model: '' } };
+  await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'downmodel-2', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  mod._state.routes = routesBackup.pop();
+  mod._state.store.claude = mod._state.store.claude.filter(p => p.id !== 'pdown');
+
+  const errLogs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs?status=err')).text);
+  assert.ok(errLogs.logs.length >= 1, '应有失败记录');
+  assert.ok(errLogs.logs.every(l => l.status >= 400 || l.status === 0 || l.err));
+
+  const okLogs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs?status=ok')).text);
+  assert.ok(okLogs.logs.length >= 1);
+  assert.ok(okLogs.logs.every(l => l.status >= 200 && l.status < 400 && !l.err));
+
+  const provLogs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs?provider=' + encodeURIComponent('测试渠道一'))).text);
+  assert.ok(provLogs.logs.length >= 1);
+  assert.ok(provLogs.logs.every(l => (l.provider || '').includes('测试渠道一')));
+
+  const modelLogs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs?model=downmodel')).text);
+  assert.ok(modelLogs.logs.length >= 1);
+  assert.ok(modelLogs.logs.every(l => ((l.model_in || '') + (l.model_out || '')).includes('downmodel')));
+
+  const stats = JSON.parse((await rawRequest(uiPort, 'GET', '/api/stats')).text);
+  const all = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs?limit=500')).text);
+  assert.strictEqual(stats.reqs, all.logs.length, '统计总数须与全量日志一致');
+  assert.ok((stats.by_provider['测试渠道一'] || 0) >= 1);
+  assert.ok(stats.ok_rate >= 0 && stats.ok_rate <= 100);
+  assert.ok(stats.inTok >= 17 && stats.outTok >= 9, 'usage 应已被聚合');
+});
+
 test('控制台 API:PUT /api/routes 持久化并生效', async () => {
   const fileRoutes = JSON.parse(fs.readFileSync(path.join(TMP, 'routes.json'), 'utf8')); // require 时装载的原始路由
   const put = await rawRequest(uiPort, 'PUT', '/api/routes', {

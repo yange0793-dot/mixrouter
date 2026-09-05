@@ -55,16 +55,21 @@
 
   /* ---------- 渠道卡片 ---------- */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 15px 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 15px 16px 12px; display: flex; flex-direction: column; gap: 8px; transition: box-shadow .15s, border-color .15s, opacity .15s; }
+  .card:not(.cur):hover { border-color: #3a4050; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
   .card.off { opacity: .55; }
-  .card.cur { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok) inset; }
+  .card.cur { border-color: rgba(62,207,142,.65); box-shadow: 0 0 0 1px rgba(62,207,142,.45) inset, 0 2px 14px rgba(62,207,142,.1); }
   .card .top { display: flex; align-items: center; gap: 9px; }
   .cdot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
   .card .name { font-weight: 650; font-size: 15px; }
-  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid; }
-  .badge.on { color: var(--ok); border-color: var(--ok); }
-  .badge.off { color: var(--dim); border-color: var(--dim); }
-  .badge.drift { color: var(--warn); border-color: var(--warn); }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 6px; font-weight: 600; border: none; }
+  .badge.on { background: rgba(62,207,142,.16); color: var(--ok); }
+  .badge.off { background: rgba(139,144,154,.16); color: var(--dim); }
+  .badge.drift { background: rgba(245,166,35,.16); color: var(--warn); }
+  .badge.info { background: rgba(79,140,255,.16); color: var(--accent); }
+  .banner { display: none; align-items: flex-start; gap: 10px; border: 1px solid rgba(245,166,35,.3); background: rgba(245,166,35,.08); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13px; color: var(--warn); line-height: 1.6; }
+  .banner.show { display: flex; }
+  .banner .ic { flex-shrink: 0; }
   .mono { font-family: var(--mono); font-size: 12px; color: var(--dim); word-break: break-all; }
   .tags { display: flex; flex-wrap: wrap; gap: 5px; }
   .tag { font-family: var(--mono); font-size: 11px; background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; color: #b8bdc7; }
@@ -72,8 +77,8 @@
   .testline { font-size: 12px; min-height: 16px; }
   .testline.ok { color: var(--ok); } .testline.err { color: var(--err); } .testline.wait { color: var(--dim); }
   .card .foot { display: flex; gap: 7px; margin-top: auto; padding-top: 8px; }
-  .empty { text-align: center; color: var(--dim); padding: 70px 0; }
-  .empty b { display: block; font-size: 16px; color: var(--text); margin-bottom: 8px; }
+  .empty { text-align: center; color: var(--dim); padding: 46px 0; border: 1px dashed var(--border); border-radius: 12px; background: rgba(255,255,255,.012); margin-top: 4px; }
+  .empty b { display: block; font-size: 15px; color: var(--text); margin-bottom: 8px; }
 
   /* ---------- 路由 ---------- */
   .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
@@ -108,8 +113,17 @@
   .modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
   .modal .chk { display: flex; align-items: center; gap: 8px; margin-top: 16px; font-size: 13px; }
   .modal .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  #toast { position: fixed; right: 22px; bottom: 22px; background: var(--card2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; padding: 11px 16px; font-size: 13px; display: none; z-index: 99; max-width: 380px; }
+  #toast { position: fixed; right: 22px; top: 20px; background: rgba(34,37,44,.94); backdrop-filter: blur(8px); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 11px; padding: 11px 16px; font-size: 13px; display: none; z-index: 99; max-width: 380px; box-shadow: 0 6px 24px rgba(0,0,0,.35); animation: toastin .18s ease; }
   #toast.ok { border-left-color: var(--ok); } #toast.err { border-left-color: var(--err); }
+  @keyframes toastin { from { transform: translateX(14px); opacity: 0; } }
+
+  /* ---------- 日志筛选与统计 ---------- */
+  .chips { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .chip { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 9px 14px; font-size: 12px; color: var(--dim); min-width: 86px; }
+  .chip b { display: block; font-size: 16px; color: var(--text); font-weight: 650; margin-top: 2px; font-family: var(--mono); }
+  .logbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .logbar label { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
+  .logbar input[type=text], .logbar select { width: auto; min-width: 150px; }
 </style>
 </head>
 <body>
@@ -142,6 +156,7 @@
         <button id="tab-codex" onclick="setApp('codex')"><span class="appdot" style="background:#10a37f"></span>Codex</button>
       </div>
       <div class="liveinfo" id="liveinfo"></div>
+      <div class="banner" id="drift-banner"><span class="ic">⚠</span><span id="drift-text"></span></div>
       <div class="grid" id="prov-grid"></div>
       <div class="empty" id="prov-empty" style="display:none">
         <b id="empty-title">还没有渠道</b><span id="empty-hint">点击右上角「新建渠道」添加</span>
@@ -171,10 +186,24 @@
     <!-- 日志 -->
     <section id="view-logs" style="display:none">
       <div class="head">
-        <div><h1>请求日志</h1><div class="sub">内存保留最近 500 条,落盘 logs/requests.jsonl(5MB 轮转)</div></div>
+        <div><h1>请求日志</h1><div class="sub">内存保留最近 500 条,落盘 logs/requests.jsonl(5MB 轮转);统计为内存窗口内全量聚合</div></div>
         <label style="display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px">
           <input type="checkbox" id="logs-auto" checked style="accent-color:var(--accent)"> 自动刷新(5s)
         </label>
+      </div>
+      <div class="chips" id="stat-chips"></div>
+      <div class="logbar">
+        <label>渠道 <input type="text" id="f-provider" placeholder="渠道名子串"></label>
+        <label>模型 <input type="text" id="f-model" placeholder="模型名子串"></label>
+        <label>状态
+          <select id="f-status">
+            <option value="">全部</option>
+            <option value="ok">仅成功 (2xx/3xx)</option>
+            <option value="err">仅失败 (4xx/5xx/断连)</option>
+          </select>
+        </label>
+        <button class="small" onclick="loadLogs()">应用</button>
+        <button class="small" onclick="clearFilters()">清空</button>
       </div>
       <table>
         <thead><tr><th>时间</th><th>渠道</th><th>模型 入 → 出</th><th>输入</th><th>输出</th><th>缓存读</th><th>耗时</th><th>状态</th><th>错误</th></tr></thead>
@@ -254,7 +283,7 @@ document.querySelectorAll('nav a').forEach(a => a.onclick = () => {
   view = a.dataset.view;
   document.querySelectorAll('nav a').forEach(x => x.classList.toggle('active', x === a));
   for (const v of ['providers','routes','logs']) $('view-' + v).style.display = v === view ? '' : 'none';
-  if (view === 'logs') { loadLogs(); restartLogsTimer(); } else { clearInterval(logsTimer); logsTimer = null; }
+  if (view === 'logs') { loadLogs(); loadStats(); restartLogsTimer(); } else { clearInterval(logsTimer); logsTimer = null; }
   refresh();
 });
 
@@ -292,6 +321,12 @@ function renderProviders() {
     : '点击右上角「新建渠道」添加;Codex 渠道直接写入 ~/.codex/config.toml(不经过路由器)';
   $('prov-empty').style.display = ps.length ? 'none' : '';
   $('liveinfo').innerHTML = liveLine();
+  // 配置漂移横幅(cc-switch 式琥珀警告)
+  const lv = state.live[curApp], curId = state.current[curApp];
+  const drifted = !!(curId && lv && !lv.match);
+  $('drift-banner').classList.toggle('show', drifted);
+  if (drifted) $('drift-text').textContent =
+    `${APPS[curApp].label} 的客户端真实配置与库内所选渠道不一致(配置漂移)。点当前渠道卡片上的「重新写入」即可恢复一致;写入前会自动备份原文件。`;
   $('prov-grid').innerHTML = ps.map((p, i) => {
     const isCur = state.current[curApp] === p.id;
     const lv = state.live[curApp];
@@ -427,10 +462,29 @@ async function saveRoutes() {
 }
 
 // ---------------- 日志 ----------------
+async function loadStats() {
+  try {
+    const s = await api('/api/stats');
+    const chips = [
+      ['总请求', s.reqs],
+      ['成功率', s.ok_rate + '%'],
+      ['输入 tokens', fmtTok(s.inTok)],
+      ['输出 tokens', fmtTok(s.outTok)],
+      ['缓存读', fmtTok(s.cache)],
+    ];
+    $('stat-chips').innerHTML = chips.map(([k, v]) => `<div class="chip">${k}<b>${esc(String(v))}</b></div>`).join('');
+  } catch {}
+}
 async function loadLogs() {
   try {
-    const { logs } = await api('/api/logs?limit=200');
+    const q = new URLSearchParams();
+    if ($('f-provider').value.trim()) q.set('provider', $('f-provider').value.trim());
+    if ($('f-model').value.trim()) q.set('model', $('f-model').value.trim());
+    if ($('f-status').value) q.set('status', $('f-status').value);
+    q.set('limit', '200');
+    const { logs } = await api('/api/logs?' + q.toString());
     $('logs-empty').style.display = logs.length ? 'none' : '';
+    $('logs-empty').innerHTML = '<b>没有匹配的请求</b>调整筛选条件或经 127.0.0.1:8787 发起调用';
     $('logs-body').innerHTML = logs.map(l => {
       const cls = l.status >= 500 || l.status === 0 ? 'st5' : l.status >= 400 ? 'st4' : 'st2';
       return `<tr><td>${esc(l.ts.slice(5, 19))}</td><td style="font-family:inherit">${esc(l.provider || '-')}</td>
@@ -441,7 +495,11 @@ async function loadLogs() {
     }).join('');
   } catch {}
 }
-function restartLogsTimer() { clearInterval(logsTimer); logsTimer = setInterval(() => { if ($('logs-auto').checked) loadLogs(); }, 5000); }
+function clearFilters() {
+  $('f-provider').value = ''; $('f-model').value = ''; $('f-status').value = '';
+  loadLogs();
+}
+function restartLogsTimer() { clearInterval(logsTimer); logsTimer = setInterval(() => { if ($('logs-auto').checked) { loadLogs(); loadStats(); } }, 5000); }
 
 refresh();
 </script>

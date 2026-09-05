@@ -1,4 +1,4 @@
-# Mixrouter v2.1
+# Mixrouter
 
 [![CI](https://github.com/yange0793-dot/mixrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yange0793-dot/mixrouter/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,6 +8,8 @@
 
 - **渠道分 Claude Code / Codex 两组**,自由增删改查,一键「切换」写入客户端真实配置(自动备份,保留原文件其余内容)
 - **路由核心**:经 :8787 的请求按模型名规则改写并转发到不同上游(仅 Claude 组渠道为目标)
+- **控制台 UI 对齐 cc-switch 视觉语言**:软色状态徽章(当前/配置漂移/停用)、当前渠道
+  翠绿描边发光、漂移琥珀警告横幅、虚线空态、右上角滑入 toast、请求日志统计条 + 渠道/模型/状态筛选
 
 ```
 ~/mixrouter/
@@ -74,10 +76,10 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
 
 ## 已验证(2026-09-05,v2.1)
 
-- **自动化测试 36 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
+- **自动化测试 37 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
   - 纯函数:模型改写与 `[1M]` beta 头合并、header 消洗、SSE/JSON usage 抽取、key 脱敏、TOML 转义、路由解析(优先级/停用/默认兜底)。
   - 配置切换(夹具经环境变量重定向):claude 组保留 settings.json 其余键 + 自动备份 + 0600;codex 组 mixr-* section 幂等替换、用户自定义 section 一字不动、live 漂移比对。
-  - 代理全链路(mock 上游 + 临时端口):非流式/流式转发、模型改写、鉴权头、UA 兜底、count_tokens、503/502 错误路径、控制台 CRUD 与 key 不出网掩码。
+  - 代理全链路(mock 上游 + 临时端口):非流式/流式转发、模型改写、鉴权头、UA 兜底、count_tokens、503 分型(no_route_error / provider_disabled_error)、413 超限体面拒绝、base_url 保存校验、日志过滤(provider/model/status)与 /api/stats 聚合一致性、控制台 CRUD 与 key 不出网掩码。
 - 真实环境手测:https 上游(对 agentrouter.org 实测,上游 401 原样透传)。
 
 ## 开发
@@ -93,9 +95,9 @@ npm test                 # node --test test/*.test.js
 
 ## Roadmap
 
-- [v2.1.x 稳定性](https://github.com/yange0793-dot/mixrouter/milestone/1):小修快跑
-- [v2.2 路由与可观测性](https://github.com/yange0793-dot/mixrouter/milestone/2):错误码细化、日志结构化查询
-- [v3 Codex 组走代理](https://github.com/yange0793-dot/mixrouter/milestone/3):Codex 渠道经 :8787 统一路由
+- [x] [v2.1.x 稳定性](https://github.com/yange0793-dot/mixrouter/milestone/1) — v2.1.1 已发:413 体面拒绝、base_url 校验、503 分型
+- [x] [v2.2 路由与可观测性](https://github.com/yange0793-dot/mixrouter/milestone/2) — v2.2.0 已发:日志过滤 + /api/stats 聚合、控制台 UI 对齐 cc-switch
+- [ ] [v3 Codex 组走代理](https://github.com/yange0793-dot/mixrouter/milestone/3):Codex 渠道经 :8787 统一路由
 
 ## License
 

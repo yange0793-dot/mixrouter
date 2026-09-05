@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const VERSION = '2.1.1';
+const VERSION = '2.2.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -415,10 +415,35 @@ function apiHandler(req, res) {
         current, live: liveState(), routes,
       });
     }
-    // ---- 日志
+    // ---- 日志(支持过滤:provider 模型子串 / model 子串 / status=ok|err|具体码 / limit)
     if (req.method === 'GET' && p === '/api/logs') {
-      const limit = Math.min(Number(url.searchParams.get('limit') || 200), RING_SIZE);
-      return send(200, { logs: ring.slice(-limit).reverse() });
+      const q = url.searchParams;
+      const limit = Math.min(Number(q.get('limit') || 200), RING_SIZE);
+      const prov = (q.get('provider') || '').toLowerCase();
+      const model = (q.get('model') || '').toLowerCase();
+      const status = q.get('status') || '';
+      let items = ring;
+      if (prov) items = items.filter(e => (e.provider || '').toLowerCase().includes(prov));
+      if (model) items = items.filter(e => (e.model_in || '').toLowerCase().includes(model) || (e.model_out || '').toLowerCase().includes(model));
+      if (status === 'ok') items = items.filter(e => e.status >= 200 && e.status < 400 && !e.err);
+      else if (status === 'err') items = items.filter(e => e.status >= 400 || e.status === 0 || e.err);
+      else if (status) items = items.filter(e => String(e.status) === status);
+      return send(200, { logs: items.slice(-limit).reverse() });
+    }
+    // ---- 统计:ring 内存窗口内的全量聚合(总数/成功率/token/按渠道/按模型)
+    if (req.method === 'GET' && p === '/api/stats') {
+      let reqs = 0, ok = 0, inTok = 0, outTok = 0, cache = 0;
+      const byProvider = {}, byModel = {};
+      for (const e of ring) {
+        reqs++;
+        if (e.status >= 200 && e.status < 400 && !e.err) ok++;
+        inTok += e.in || 0; outTok += e.out || 0; cache += e.cache_read || 0;
+        const pv = e.provider || '(未知)';
+        byProvider[pv] = (byProvider[pv] || 0) + 1;
+        const mk = e.model_out || e.model_in || '(?)';
+        byModel[mk] = (byModel[mk] || 0) + 1;
+      }
+      return send(200, { reqs, ok, ok_rate: reqs ? Math.round(ok * 100 / reqs) : 100, inTok, outTok, cache, by_provider: byProvider, by_model: byModel });
     }
     // ---- 渠道 CRUD(app = claude | codex)
     if (req.method === 'POST' && p === '/api/providers') {

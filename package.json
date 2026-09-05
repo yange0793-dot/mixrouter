@@ -1,6 +1,6 @@
 {
   "name": "mixrouter",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "description": "本地 Anthropic 协议模型路由器 + cc-switch 式客户端配置切换(零依赖,Node >= 18)",
   "main": "mixrouter.js",
