@@ -5,6 +5,10 @@
 const http = require('http');
 
 http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url.includes('/models')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ data: [{ id: 'mock-model' }] }));
+  }
   if (req.method !== 'POST') { res.writeHead(404); return res.end('not found'); }
   const cs = [];
   req.on('data', c => cs.push(c));

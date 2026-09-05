@@ -60,14 +60,18 @@ async function status() {
 async function ls() {
   let s;
   try { s = await api('/api/state'); } catch { return console.log('mixrouter 未运行或控制台不可达'); }
-  const nameOf = id => { const p = s.providers.find(x => x.id === id); return p ? p.name + (p.enabled ? '' : '(停用)') : '(未绑定)'; };
-  console.log('路由(请求模型名子串 → 渠道 @ 目标模型):');
+  const nameOf = id => { for (const g of ['claude', 'codex']) { const p = s.providers[g].find(x => x.id === id); if (p) return p.name + (p.enabled ? '' : '(停用)'); } return '(未绑定)'; };
+  console.log('路由(请求模型名子串 → Claude 渠道 @ 目标模型):');
   for (const r of s.routes.rules)
     console.log(`  ${r.enabled ? ' ' : '#'} ${r.match || '(空)'}  →  ${nameOf(r.provider)}${r.model ? ' @ ' + r.model : ' @ 透传'}`);
   console.log(`  兜底  →  ${nameOf(s.routes.default.provider)}${s.routes.default.model ? ' @ ' + s.routes.default.model : ' @ 透传'}`);
-  console.log(`\n渠道 ${s.providers.length} 个:`);
-  for (const p of s.providers)
-    console.log(`  [${p.enabled ? '启用' : '停用'}] ${p.name}  ${p.base_url}  ${p.models.join(', ') || '(未配模型)'}`);
+  const cur = s.current, live = s.live;
+  console.log(`\nClaude Code 渠道 ${s.providers.claude.length} 个(当前生效 ${live.claude.base_url || '(未配置)'},${cur.claude ? '库内选中 ' + nameOf(cur.claude) + (live.claude.match ? ' ✓' : ' ⚠配置漂移') : '库内未选中'}):`);
+  for (const p of s.providers.claude)
+    console.log(`  ${cur.claude === p.id ? '*' : ' '} [${p.enabled ? '启用' : '停用'}] ${p.name}  ${p.base_url}  ${p.models.join(', ') || '(未配模型)'}`);
+  console.log(`\nCodex 渠道 ${s.providers.codex.length} 个(当前生效 ${live.codex.provider || '(未配置)'},${cur.codex ? '库内选中 ' + nameOf(cur.codex) + (live.codex.match ? ' ✓' : ' ⚠配置漂移') : '库内未选中'}):`);
+  for (const p of s.providers.codex)
+    console.log(`  ${cur.codex === p.id ? '*' : ' '} [${p.enabled ? '启用' : '停用'}] ${p.name}  ${p.base_url}  ${p.model} (${p.wire_api})`);
 }
 function logs(n = 20) {
   try {
