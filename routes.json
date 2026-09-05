@@ -1,0 +1,36 @@
+{
+  "rules": [
+    {
+      "id": "r1",
+      "match": "opus, claude-3-opus",
+      "provider": "",
+      "model": "",
+      "enabled": true
+    },
+    {
+      "id": "r2",
+      "match": "sonnet",
+      "provider": "",
+      "model": "",
+      "enabled": true
+    },
+    {
+      "id": "r3",
+      "match": "haiku",
+      "provider": "",
+      "model": "",
+      "enabled": true
+    },
+    {
+      "id": "r4",
+      "match": "fable",
+      "provider": "",
+      "model": "",
+      "enabled": true
+    }
+  ],
+  "default": {
+    "provider": "",
+    "model": ""
+  }
+}

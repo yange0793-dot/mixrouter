@@ -1,0 +1,10 @@
+# 含明文 key,永不入库;用 providers.example.json 作模板
+providers.json
+providers.json.tmp
+
+# 运行时产物
+logs/
+.run/
+
+# 系统
+.DS_Store

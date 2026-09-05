@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+// mixctl — mixrouter 管理命令
+//   start | stop | restart | status | ls | logs [n] | open | help
+'use strict';
+const { spawn, execSync } = require('child_process');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = __dirname;
+const RUN_DIR = path.join(ROOT, '.run');
+const PID_FILE = path.join(RUN_DIR, 'mixrouter.pid');
+const SERVER_LOG = path.join(ROOT, 'logs', 'server.log');
+const REQ_LOG = path.join(ROOT, 'logs', 'requests.jsonl');
+const UI_PORT = process.env.MIXUI_PORT || 8788;
+
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const getPid = () => { try { return Number(fs.readFileSync(PID_FILE, 'utf8').trim()); } catch { return 0; } };
+const api = p => new Promise((ok, bad) => {
+  http.get(`http://127.0.0.1:${UI_PORT}${p}`, r => {
+    let s = ''; r.on('data', c => s += c); r.on('end', () => { try { ok(JSON.parse(s)); } catch (e) { bad(e); } });
+  }).on('error', bad);
+});
+
+function start() {
+  const pid = getPid();
+  if (pid && alive(pid)) return console.log(`mixrouter 已在运行 (pid ${pid}),控制台 http://127.0.0.1:${UI_PORT}`);
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  fs.mkdirSync(path.dirname(SERVER_LOG), { recursive: true });
+  const out = fs.openSync(SERVER_LOG, 'a');
+  const child = spawn(process.execPath, [path.join(ROOT, 'mixrouter.js')], { detached: true, stdio: ['ignore', out, out], env: process.env });
+  child.unref();
+  fs.writeFileSync(PID_FILE, String(child.pid));
+  // 等控制台端口就绪(最多 5s)
+  const t0 = Date.now();
+  const poll = () => api('/healthz').then(() => console.log(`mixrouter 已启动 (pid ${child.pid})\n  代理   http://127.0.0.1:8787/v1/messages\n  控制台 http://127.0.0.1:${UI_PORT}`))
+    .catch(() => Date.now() - t0 > 5000 ? console.log(`已派生 pid ${child.pid},但端口未就绪,查看日志: mixctl logs`) : setTimeout(poll, 300));
+  poll();
+}
+function stop() {
+  const pid = getPid();
+  if (!pid || !alive(pid)) { try { fs.unlinkSync(PID_FILE); } catch {} return console.log('mixrouter 未在运行'); }
+  process.kill(pid, 'SIGTERM');
+  const t0 = Date.now();
+  const wait = () => alive(pid) ? (Date.now() - t0 > 4000 ? (process.kill(pid, 'SIGKILL'), console.log(`已强杀 pid ${pid}`))
+    : setTimeout(wait, 200)) : (fs.unlinkSync(PID_FILE), console.log(`已停止 (pid ${pid})`));
+  wait();
+}
+async function status() {
+  const pid = getPid();
+  const running = pid && alive(pid);
+  console.log(`进程:   ${running ? `运行中 (pid ${pid})` : '未运行'}`);
+  try {
+    const s = await api('/api/state');
+    console.log(`版本:   v${s.version}   运行时长 ${Math.floor(s.uptime_s / 60)} 分 ${s.uptime_s % 60} 秒`);
+    console.log(`端口:   代理 :${s.proxy_port}  控制台 :${s.ui_port}`);
+    console.log(`今日:   ${s.stats.reqs} 次请求,入 ${s.stats.inTok} / 出 ${s.stats.outTok} tokens`);
+  } catch { console.log('控制台不可达'); }
+}
+async function ls() {
+  let s;
+  try { s = await api('/api/state'); } catch { return console.log('mixrouter 未运行或控制台不可达'); }
+  const nameOf = id => { const p = s.providers.find(x => x.id === id); return p ? p.name + (p.enabled ? '' : '(停用)') : '(未绑定)'; };
+  console.log('路由(请求模型名子串 → 渠道 @ 目标模型):');
+  for (const r of s.routes.rules)
+    console.log(`  ${r.enabled ? ' ' : '#'} ${r.match || '(空)'}  →  ${nameOf(r.provider)}${r.model ? ' @ ' + r.model : ' @ 透传'}`);
+  console.log(`  兜底  →  ${nameOf(s.routes.default.provider)}${s.routes.default.model ? ' @ ' + s.routes.default.model : ' @ 透传'}`);
+  console.log(`\n渠道 ${s.providers.length} 个:`);
+  for (const p of s.providers)
+    console.log(`  [${p.enabled ? '启用' : '停用'}] ${p.name}  ${p.base_url}  ${p.models.join(', ') || '(未配模型)'}`);
+}
+function logs(n = 20) {
+  try {
+    const lines = fs.readFileSync(REQ_LOG, 'utf8').trim().split('\n').slice(-Number(n));
+    for (const l of lines) {
+      const e = JSON.parse(l);
+      console.log(`${e.ts.slice(5, 19)}  ${String(e.provider).padEnd(16)} ${e.model_in} → ${e.model_out}  in ${e.in} out ${e.out}  ${e.ms}ms  ${e.status}${e.err ? '  ' + e.err : ''}`);
+    }
+  } catch { console.log('暂无请求日志'); }
+}
+
+const cmd = process.argv[2] || 'status';
+if (cmd === 'start') start();
+else if (cmd === 'stop') stop();
+else if (cmd === 'restart') { const pid = getPid(); if (pid && alive(pid)) stop(); setTimeout(start, 600); }
+else if (cmd === 'status') status();
+else if (cmd === 'ls') ls();
+else if (cmd === 'logs') logs(process.argv[3]);
+else if (cmd === 'open') execSync(`open http://127.0.0.1:${UI_PORT}`);
+else console.log(`用法: mixctl <start|stop|restart|status|ls|logs [n]|open>`);

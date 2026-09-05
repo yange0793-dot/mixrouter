@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mixrouter 控制台</title>
+<style>
+  :root {
+    --bg: #131417; --sidebar: #1a1c20; --card: #1e2127; --card2: #22252c;
+    --border: #2b2f37; --text: #e6e8ec; --dim: #8b909a; --accent: #4f8cff;
+    --ok: #3ecf8e; --warn: #f5a623; --err: #ff6b6b; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; display: flex; min-height: 100vh; }
+
+  /* ---------- 侧栏 ---------- */
+  .sidebar { width: 210px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
+  .logo { padding: 18px 16px 14px; font-size: 17px; font-weight: 700; letter-spacing: .3px; }
+  .logo .swap { display: inline-block; color: var(--accent); margin-right: 8px; }
+  .logo small { display: block; font-size: 11px; font-weight: 400; color: var(--dim); margin-top: 2px; }
+  nav { padding: 6px 8px; }
+  nav a { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; color: var(--dim); text-decoration: none; cursor: pointer; margin-bottom: 2px; }
+  nav a:hover { background: var(--card2); color: var(--text); }
+  nav a.active { background: var(--card2); color: var(--text); }
+  nav a.active .ic { color: var(--accent); }
+  .ic { width: 17px; text-align: center; }
+  .status { margin-top: auto; padding: 14px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
+  .status .run { display: flex; align-items: center; gap: 7px; color: var(--ok); font-weight: 600; margin-bottom: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  .status .row { display: flex; justify-content: space-between; margin-top: 3px; }
+  .status .row b { color: var(--text); font-weight: 500; }
+
+  /* ---------- 主区 ---------- */
+  main { flex: 1; padding: 22px 26px 40px; max-width: 1200px; }
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .head h1 { font-size: 19px; font-weight: 700; }
+  .head .sub { color: var(--dim); font-size: 12px; margin-top: 3px; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--border); background: var(--card2); color: var(--text); border-radius: 8px; padding: 6px 14px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { opacity: .9; }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  button.small { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+
+  /* ---------- 渠道卡片 ---------- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 15px 16px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .card.off { opacity: .55; }
+  .card .top { display: flex; align-items: center; gap: 9px; }
+  .cdot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .card .name { font-weight: 650; font-size: 15px; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid; }
+  .badge.on { color: var(--ok); border-color: var(--ok); }
+  .badge.off { color: var(--dim); border-color: var(--dim); }
+  .mono { font-family: var(--mono); font-size: 12px; color: var(--dim); word-break: break-all; }
+  .tags { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tag { font-family: var(--mono); font-size: 11px; background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; color: #b8bdc7; }
+  .note { font-size: 12px; color: var(--warn); }
+  .testline { font-size: 12px; min-height: 16px; }
+  .testline.ok { color: var(--ok); } .testline.err { color: var(--err); } .testline.wait { color: var(--dim); }
+  .card .foot { display: flex; gap: 7px; margin-top: auto; padding-top: 8px; }
+  .empty { text-align: center; color: var(--dim); padding: 70px 0; }
+  .empty b { display: block; font-size: 16px; color: var(--text); margin-bottom: 8px; }
+
+  /* ---------- 路由 ---------- */
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+  .panel h2 { font-size: 15px; margin-bottom: 4px; }
+  .panel .hint { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
+  .rule { display: grid; grid-template-columns: 1fr 220px 1fr 60px 30px; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); }
+  .rule.head-row { border-top: none; color: var(--dim); font-size: 12px; padding-bottom: 2px; }
+  input[type=text], input[type=password], select {
+    width: 100%; background: var(--card2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 7px 10px; font: inherit; font-size: 13px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .rule input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
+  .iconbtn { background: none; border: none; color: var(--dim); font-size: 17px; padding: 2px 6px; }
+  .iconbtn:hover { color: var(--err); }
+  .savebar { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+  .savebar .msg { font-size: 12px; color: var(--ok); }
+
+  /* ---------- 日志 ---------- */
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th { text-align: left; font-size: 12px; color: var(--dim); font-weight: 500; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--card2); }
+  td { padding: 8px 12px; font-size: 12.5px; border-bottom: 1px solid var(--border); font-family: var(--mono); }
+  td:first-child { font-family: inherit; color: var(--dim); white-space: nowrap; }
+  .st2 { color: var(--ok); } .st4, .st5 { color: var(--err); }
+
+  /* ---------- 弹窗 / 提示 ---------- */
+  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: flex-start; justify-content: center; padding-top: 9vh; z-index: 50; }
+  .mask.show { display: flex; }
+  .modal { background: var(--sidebar); border: 1px solid var(--border); border-radius: 14px; width: 520px; max-width: 92vw; padding: 22px 24px; }
+  .modal h3 { margin-bottom: 16px; font-size: 16px; }
+  .modal label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 5px; }
+  .modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+  .modal .chk { display: flex; align-items: center; gap: 8px; margin-top: 16px; font-size: 13px; }
+  #toast { position: fixed; right: 22px; bottom: 22px; background: var(--card2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 9px; padding: 11px 16px; font-size: 13px; display: none; z-index: 99; max-width: 380px; }
+  #toast.ok { border-left-color: var(--ok); } #toast.err { border-left-color: var(--err); }
+</style>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="logo"><span class="swap">⇄</span>Mixrouter<small>本地模型路由 · v<span id="ver">-</span></small></div>
+    <nav>
+      <a data-view="providers" class="active"><span class="ic">▤</span>渠道</a>
+      <a data-view="routes"><span class="ic">⑃</span>路由</a>
+      <a data-view="logs"><span class="ic">≣</span>请求日志</a>
+    </nav>
+    <div class="status">
+      <div class="run"><span class="dot"></span>运行中</div>
+      <div class="row"><span>代理端口</span><b id="st-proxy">-</b></div>
+      <div class="row"><span>控制台端口</span><b id="st-ui">-</b></div>
+      <div class="row"><span>运行时长</span><b id="st-up">-</b></div>
+      <div class="row"><span>今日请求</span><b id="st-req">-</b></div>
+      <div class="row"><span>今日 tokens</span><b id="st-tok">-</b></div>
+    </div>
+  </div>
+
+  <main>
+    <!-- 渠道 -->
+    <section id="view-providers">
+      <div class="head">
+        <div><h1>渠道</h1><div class="sub">Anthropic 协议上游,请求将被转发到 <code style="font-family:var(--mono)">base_url + /v1/messages</code></div></div>
+        <button class="primary" onclick="openProvider()">＋ 新建渠道</button>
+      </div>
+      <div class="grid" id="prov-grid"></div>
+      <div class="empty" id="prov-empty" style="display:none">
+        <b>还没有渠道</b>点击右上角「新建渠道」添加,或运行 <code style="font-family:var(--mono)">node scripts/import-ccswitch.js</code> 从 cc-switch 备份导入
+      </div>
+    </section>
+
+    <!-- 路由 -->
+    <section id="view-routes" style="display:none">
+      <div class="head"><div><h1>路由</h1><div class="sub">按请求模型名匹配(子串,逗号分隔多个,大小写不敏感),自上而下首个启用的规则生效</div></div>
+        <button class="primary" onclick="saveRoutes()">保存路由</button></div>
+      <div class="panel">
+        <h2>规则</h2>
+        <div class="hint">目标模型留空 = 原样透传请求模型;目标模型带 <code style="font-family:var(--mono)">[1M]</code> 后缀 = 自动剥离并附加 context-1m beta 头</div>
+        <div class="rule head-row"><span>匹配(请求模型名包含…)</span><span>渠道</span><span>目标模型</span><span>启用</span><span></span></div>
+        <div id="rules-box"></div>
+        <div class="savebar"><button onclick="addRule()">＋ 添加规则</button><span class="msg" id="save-msg"></span></div>
+      </div>
+      <div class="panel">
+        <h2>默认路由</h2>
+        <div class="hint">所有规则都未命中时使用;渠道未绑定时请求将报 503</div>
+        <div class="rule" style="border-top:none"><span style="color:var(--dim)">兜底</span>
+          <select id="def-provider"></select><input type="text" id="def-model" placeholder="目标模型,留空透传">
+          <span></span><span></span></div>
+      </div>
+    </section>
+
+    <!-- 日志 -->
+    <section id="view-logs" style="display:none">
+      <div class="head">
+        <div><h1>请求日志</h1><div class="sub">内存保留最近 500 条,落盘 logs/requests.jsonl(5MB 轮转)</div></div>
+        <label style="display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px">
+          <input type="checkbox" id="logs-auto" checked style="accent-color:var(--accent)"> 自动刷新(5s)
+        </label>
+      </div>
+      <table>
+        <thead><tr><th>时间</th><th>渠道</th><th>模型 入 → 出</th><th>输入</th><th>输出</th><th>缓存读</th><th>耗时</th><th>状态</th><th>错误</th></tr></thead>
+        <tbody id="logs-body"></tbody>
+      </table>
+      <div class="empty" id="logs-empty" style="display:none"><b>暂无请求</b>经 127.0.0.1:8787 的调用会显示在这里</div>
+    </section>
+  </main>
+
+  <!-- 渠道编辑弹窗 -->
+  <div class="mask" id="mask">
+    <div class="modal">
+      <h3 id="m-title">新建渠道</h3>
+      <label>名称 *</label><input type="text" id="m-name" placeholder="如 AgentRouter">
+      <label>Base URL *</label><input type="text" id="m-base" placeholder="https://api.example.com">
+      <label>API Key <span id="m-key-hint"></span></label><input type="password" id="m-key" placeholder="sk-…">
+      <label>模型列表(逗号分隔,第一个作为连通性测试模型)</label><input type="text" id="m-models" placeholder="claude-opus-5, claude-sonnet-4-6">
+      <label>备注</label><input type="text" id="m-note" placeholder="">
+      <div class="chk"><input type="checkbox" id="m-enabled" checked><span>启用</span></div>
+      <div class="foot"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveProvider()">保存</button></div>
+    </div>
+  </div>
+  <div id="toast"></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const COLORS = ['#4f8cff','#3ecf8e','#f5a623','#c792ea','#ff8a80','#4dd0e1','#ffd54f','#a1887f'];
+let state = null, view = 'providers', editing = null, routesDraft = null, testResults = {}, logsTimer = null;
+
+async function api(path, opt) {
+  const r = await fetch(path, opt ? { headers: { 'Content-Type': 'application/json' }, ...opt } : undefined);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+function toast(msg, cls = '') { const t = $('toast'); t.textContent = msg; t.className = cls; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600); }
+const fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+const fmtUp = s => s >= 3600 ? (s/3600).toFixed(1) + 'h' : s >= 60 ? Math.floor(s/60) + 'm' + Math.floor(s%60) + 's' : s + 's';
+
+// ---------------- 状态轮询 ----------------
+async function refresh() {
+  try {
+    state = await api('/api/state');
+    $('ver').textContent = state.version;
+    $('st-proxy').textContent = state.proxy_port;
+    $('st-ui').textContent = state.ui_port;
+    $('st-up').textContent = fmtUp(state.uptime_s);
+    $('st-req').textContent = state.stats.reqs;
+    $('st-tok').textContent = fmtTok(state.stats.inTok) + ' / ' + fmtTok(state.stats.outTok);
+    if (view === 'providers') renderProviders();
+    if (view === 'routes') renderRoutes();
+  } catch (e) { /* 控制台短暂不可达时静默 */ }
+}
+setInterval(refresh, 5000);
+
+// ---------------- 视图切换 ----------------
+document.querySelectorAll('nav a').forEach(a => a.onclick = () => {
+  view = a.dataset.view;
+  document.querySelectorAll('nav a').forEach(x => x.classList.toggle('active', x === a));
+  for (const v of ['providers','routes','logs']) $('view-' + v).style.display = v === view ? '' : 'none';
+  if (view === 'logs') { loadLogs(); restartLogsTimer(); } else { clearInterval(logsTimer); logsTimer = null; }
+  refresh();
+});
+
+// ---------------- 渠道 ----------------
+function renderProviders() {
+  const ps = state.providers;
+  $('prov-empty').style.display = ps.length ? 'none' : '';
+  $('prov-grid').innerHTML = ps.map((p, i) => {
+    const t = testResults[p.id];
+    const tline = !t ? '' : t.wait ? '<div class="testline wait">测试中…</div>'
+      : t.ok ? `<div class="testline ok">✓ 测试通过 · ${t.status} · ${t.ms}ms · ${esc(t.model)}</div>`
+      : `<div class="testline err">✗ 测试失败 · ${esc(t.error || ('HTTP ' + t.status))}${t.body ? ' · ' + esc(t.body.slice(0,120)) : ''}</div>`;
+    return `<div class="card ${p.enabled ? '' : 'off'}">
+      <div class="top"><span class="cdot" style="background:${COLORS[i % COLORS.length]}"></span>
+        <span class="name">${esc(p.name)}</span>
+        <span class="badge ${p.enabled ? 'on' : 'off'}">${p.enabled ? '启用' : '停用'}</span></div>
+      <div class="mono">${esc(p.base_url)}</div>
+      <div class="mono">key: ${esc(p.key_masked || '(未配置)')}</div>
+      ${p.models.length ? `<div class="tags">${p.models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}</div>` : ''}
+      ${p.note ? `<div class="note">${esc(p.note)}</div>` : ''}
+      ${tline}
+      <div class="foot">
+        <button class="small" onclick="testProvider('${p.id}')">测试</button>
+        <button class="small" onclick="openProvider('${p.id}')">编辑</button>
+        <button class="small" onclick="toggleProvider('${p.id}')">${p.enabled ? '停用' : '启用'}</button>
+        <button class="small danger" onclick="delProvider('${p.id}')">删除</button>
+      </div></div>`;
+  }).join('');
+}
+function openProvider(id) {
+  editing = id ? state.providers.find(p => p.id === id) : null;
+  $('m-title').textContent = editing ? '编辑渠道' : '新建渠道';
+  $('m-name').value = editing ? editing.name : '';
+  $('m-base').value = editing ? editing.base_url : '';
+  $('m-key').value = '';
+  $('m-key-hint').textContent = editing ? '(留空 = 保持不变,当前 ' + editing.key_masked + ')' : '';
+  $('m-models').value = editing ? editing.models.join(', ') : '';
+  $('m-note').value = editing ? editing.note : '';
+  $('m-enabled').checked = editing ? editing.enabled : true;
+  $('mask').classList.add('show');
+}
+function closeModal() { $('mask').classList.remove('show'); }
+async function saveProvider() {
+  const body = { name: $('m-name').value.trim(), base_url: $('m-base').value.trim(),
+    api_key: $('m-key').value, models: $('m-models').value, note: $('m-note').value, enabled: $('m-enabled').checked };
+  if (!body.name || !body.base_url) return toast('名称与 Base URL 必填', 'err');
+  try {
+    if (editing) await api('/api/providers/' + editing.id, { method: 'PUT', body: JSON.stringify(body) });
+    else await api('/api/providers', { method: 'POST', body: JSON.stringify(body) });
+    closeModal(); toast('已保存', 'ok'); refresh();
+  } catch (e) { toast('保存失败:' + e.message, 'err'); }
+}
+async function toggleProvider(id) {
+  const p = state.providers.find(x => x.id === id);
+  await api('/api/providers/' + id, { method: 'PUT', body: JSON.stringify({ enabled: !p.enabled }) });
+  refresh();
+}
+async function delProvider(id) {
+  const p = state.providers.find(x => x.id === id);
+  if (!confirm(`删除渠道「${p.name}」?`)) return;
+  await api('/api/providers/' + id, { method: 'DELETE' });
+  toast('已删除', 'ok'); refresh();
+}
+async function testProvider(id) {
+  testResults[id] = { wait: true };
+  if (view === 'providers') renderProviders();
+  try {
+    const r = await api(`/api/providers/${id}/test`, { method: 'POST' });
+    testResults[id] = r;
+  } catch (e) { testResults[id] = { ok: false, error: e.message }; }
+  if (view === 'providers') renderProviders();
+}
+
+// ---------------- 路由 ----------------
+function renderRoutes() {
+  if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
+  renderRuleSelects();
+  $('rules-box').innerHTML = routesDraft.rules.map((r, i) => `
+    <div class="rule">
+      <input type="text" value="${esc(r.match)}" oninput="routesDraft.rules[${i}].match=this.value" placeholder="如 opus, claude-3-opus">
+      <select onchange="routesDraft.rules[${i}].provider=this.value">${ruleOpts(r.provider)}</select>
+      <input type="text" value="${esc(r.model)}" oninput="routesDraft.rules[${i}].model=this.value" placeholder="留空透传">
+      <input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="routesDraft.rules[${i}].enabled=this.checked">
+      <button class="iconbtn" onclick="delRule(${i})" title="删除规则">✕</button>
+    </div>`).join('');
+  $('def-provider').innerHTML = ruleOpts(routesDraft.default.provider);
+  $('def-provider').onchange = e => routesDraft.default.provider = e.target.value;
+  $('def-model').value = routesDraft.default.model || '';
+  $('def-model').oninput = e => routesDraft.default.model = e.target.value;
+}
+function ruleOpts(sel) {
+  return '<option value="">(未绑定)</option>' + state.providers.map(p =>
+    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
+}
+function addRule() { routesDraft.rules.push({ id: 'r' + Date.now(), match: '', provider: '', model: '', enabled: true }); renderRoutes(); }
+function delRule(i) { routesDraft.rules.splice(i, 1); renderRoutes(); }
+async function saveRoutes() {
+  try {
+    await api('/api/routes', { method: 'PUT', body: JSON.stringify(routesDraft) });
+    $('save-msg').textContent = '✓ 已保存 ' + new Date().toLocaleTimeString();
+    toast('路由已保存', 'ok');
+  } catch (e) { toast('保存失败:' + e.message, 'err'); }
+}
+
+// ---------------- 日志 ----------------
+async function loadLogs() {
+  try {
+    const { logs } = await api('/api/logs?limit=200');
+    $('logs-empty').style.display = logs.length ? 'none' : '';
+    $('logs-body').innerHTML = logs.map(l => {
+      const cls = l.status >= 500 || l.status === 0 ? 'st5' : l.status >= 400 ? 'st4' : 'st2';
+      return `<tr><td>${esc(l.ts.slice(5, 19))}</td><td style="font-family:inherit">${esc(l.provider || '-')}</td>
+        <td>${esc(l.model_in)}${l.model_out && l.model_out !== l.model_in ? ' → ' + esc(l.model_out) : ''}</td>
+        <td>${l.in || '-'}</td><td>${l.out || '-'}</td><td>${l.cache_read || '-'}</td>
+        <td>${l.ms ? l.ms + 'ms' : '-'}</td><td class="${cls}">${l.status || '-'}</td>
+        <td style="color:var(--err)">${esc(l.err || '')}</td></tr>`;
+    }).join('');
+  } catch {}
+}
+function restartLogsTimer() { clearInterval(logsTimer); logsTimer = setInterval(() => { if ($('logs-auto').checked) loadLogs(); }, 5000); }
+
+refresh();
+</script>
+</body>
+</html>
