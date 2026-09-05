@@ -15,6 +15,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'mixr-proxy-'));
 process.env.MIXR_DATA_DIR = TMP;
 process.env.MIXR_CLAUDE_SETTINGS = path.join(TMP, 'settings.json');
 process.env.MIXR_CODEX_CONFIG = path.join(TMP, 'config.toml');
+process.env.MIXR_BODY_LIMIT_MB = '1'; // 便于测 413(默认 64MB,不必真发大包)
 
 const P1 = {
   id: 'p1', name: '测试渠道一', base_url: '', api_key: 'sk-test-p1', enabled: true,
@@ -156,7 +157,7 @@ test('count_tokens:转发到上游专用路径,usage 数值类型正确', async 
   assert.strictEqual(typeof logs.logs[0].in, 'number');
 });
 
-test('无命中且 default 无渠道时返回 503', async () => {
+test('无命中且 default 无渠道时返回 503 + no_route_error', async () => {
   routesBackup.push(mod._state.routes);
   mod._state.routes = { rules: [{ id: 'rx', match: 'opus', provider: 'ghost', model: '', enabled: true }],
     default: { provider: '', model: '' } };
@@ -164,17 +165,47 @@ test('无命中且 default 无渠道时返回 503', async () => {
     body: { model: 'claude-opus-5', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] },
   });
   assert.strictEqual(r.status, 503);
+  assert.strictEqual(JSON.parse(r.text).error.type, 'no_route_error');
   mod._state.routes = routesBackup.pop();
 });
 
-test('渠道停用时返回 503', async () => {
+test('渠道停用时返回 503 + provider_disabled_error', async () => {
   mod._state.store.claude[0].enabled = false; // store 里的对象经 JSON 往返,须就地改
   const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
     body: { model: 'claude-opus-5', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] },
   });
   mod._state.store.claude[0].enabled = true;
   assert.strictEqual(r.status, 503);
+  assert.strictEqual(JSON.parse(r.text).error.type, 'provider_disabled_error');
   assert.ok(JSON.parse(r.text).error.message.includes('已停用'));
+});
+
+test('请求体超过上限返回 413 而非静默断连', async () => {
+  // MIXR_BODY_LIMIT_MB=1,发 1.5MB 体
+  const big = JSON.stringify({ model: 'claude-opus-5', messages: [{ role: 'user', content: 'x'.repeat(1.5 * 1024 * 1024) }] });
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', { body: big });
+  assert.strictEqual(r.status, 413);
+  assert.strictEqual(JSON.parse(r.text).error.type, 'invalid_request_error');
+});
+
+test('base_url 非法时保存被拒(POST 与 PUT 都拦)', async () => {
+  const bad = await rawRequest(uiPort, 'POST', '/api/providers', {
+    body: { app: 'claude', name: '坏渠道', base_url: 'not-a-url', api_key: '' },
+  });
+  assert.strictEqual(bad.status, 400);
+  assert.ok(JSON.parse(bad.text).error.includes('base_url'));
+  const badScheme = await rawRequest(uiPort, 'POST', '/api/providers', {
+    body: { app: 'claude', name: '坏协议', base_url: 'ftp://x.example.com', api_key: '' },
+  });
+  assert.strictEqual(badScheme.status, 400);
+  // PUT 同样拦截:先建合法渠道,再改坏
+  const ok = await rawRequest(uiPort, 'POST', '/api/providers', {
+    body: { app: 'claude', name: '好渠道', base_url: 'https://api.example.com', api_key: '' },
+  });
+  const id = JSON.parse(ok.text).id;
+  const badPut = await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { base_url: 'javascript:alert(1)' } });
+  assert.strictEqual(badPut.status, 400);
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${id}`);
 });
 
 test('上游拒绝连接时返回 502', async () => {

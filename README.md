@@ -74,7 +74,7 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
 
 ## 已验证(2026-09-05,v2.1)
 
-- **自动化测试 33 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
+- **自动化测试 36 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
   - 纯函数:模型改写与 `[1M]` beta 头合并、header 消洗、SSE/JSON usage 抽取、key 脱敏、TOML 转义、路由解析(优先级/停用/默认兜底)。
   - 配置切换(夹具经环境变量重定向):claude 组保留 settings.json 其余键 + 自动备份 + 0600;codex 组 mixr-* section 幂等替换、用户自定义 section 一字不动、live 漂移比对。
   - 代理全链路(mock 上游 + 临时端口):非流式/流式转发、模型改写、鉴权头、UA 兜底、count_tokens、503/502 错误路径、控制台 CRUD 与 key 不出网掩码。

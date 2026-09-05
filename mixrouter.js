@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const VERSION = '2.1.0';
+const VERSION = '2.1.1';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -23,7 +23,8 @@ const PROVIDERS_FILE = path.join(DATA_DIR, 'providers.json');
 const ROUTES_FILE = path.join(DATA_DIR, 'routes.json');
 const LOG_FILE = path.join(DATA_DIR, 'logs', 'requests.jsonl');
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const BODY_LIMIT = 64 * 1024 * 1024;
+// 请求体上限可用环境变量调小(测试用),默认 64MB
+const BODY_LIMIT = Number(process.env.MIXR_BODY_LIMIT_MB || 64) * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 600 * 1000;
 const TEST_TIMEOUT_MS = 15 * 1000;
 const BETA_1M = 'context-1m-2025-08-07';
@@ -132,6 +133,12 @@ function anthropicError(res, status, type, message) {
 // HTTP 头只允许 latin-1:渠道名等注入头之前消洗掉非 ASCII,避免 ERR_INVALID_CHAR 打崩进程
 const safeHeader = s => String(s ?? '').replace(/[^\x20-\x7E]/g, '').trim();
 
+// base_url 必须是合法 http(s) URL;坏值存进库会埋雷到首次转发才炸
+function validBaseUrl(u) {
+  try { const x = new URL(String(u)); return x.protocol === 'http:' || x.protocol === 'https:'; }
+  catch { return false; }
+}
+
 // 从 SSE/JSON 响应文本里尽力抠 usage(输入来自 message_start,输出来自 message_delta)
 function extractUsage(text) {
   const u = { in: 0, out: 0, cache_read: 0 };
@@ -151,17 +158,26 @@ function proxyHandler(req, res) {
   const isCount = req.method === 'POST' && /^\/v1\/messages\/count_tokens\/?$/.test(req.url.split('?')[0]);
   if (!isMessages && !isCount) return anthropicError(res, 404, 'not_found_error', `mixrouter 只支持 POST /v1/messages (与 count_tokens),收到 ${req.method} ${req.url}`);
 
-  const chunks = []; let size = 0;
-  req.on('data', c => { size += c.length; if (size > BODY_LIMIT) { req.destroy(); return; } chunks.push(c); });
+  const chunks = []; let size = 0; let rejected = false;
+  const overLimit = () => {
+    if (rejected) return;
+    rejected = true;
+    try { if (!res.headersSent) anthropicError(res, 413, 'invalid_request_error', `请求体超过 ${Math.floor(BODY_LIMIT / 1024 / 1024)}MB 上限`); } catch {}
+    // 不炸 socket:继续排水丢弃剩余数据,让 413 干净送达(炸连接会让客户端只看到 EPIPE)
+    req.removeAllListeners('data');
+    req.resume();
+  };
+  req.on('data', c => { size += c.length; if (size > BODY_LIMIT) return overLimit(); chunks.push(c); });
   req.on('end', () => {
+    if (rejected) return;
     let body;
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { return anthropicError(res, 400, 'invalid_request_error', '请求体不是合法 JSON'); }
 
     const modelIn = body.model || '';
     const { provider, model: rawTarget } = resolveRoute(modelIn);
-    if (!provider) return anthropicError(res, 503, 'api_error', `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
-    if (provider.enabled === false) return anthropicError(res, 503, 'api_error', `路由命中的渠道 "${provider.name}" 已停用`);
+    if (!provider) return anthropicError(res, 503, 'no_route_error', `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
+    if (provider.enabled === false) return anthropicError(res, 503, 'provider_disabled_error', `路由命中的渠道 "${provider.name}" 已停用`);
 
     const headers = {
       'Content-Type': 'application/json',
@@ -409,6 +425,7 @@ function apiHandler(req, res) {
       const b = JSON.parse((await readBody()) || '{}');
       const app = b.app === 'codex' ? 'codex' : 'claude';
       if (!b.name || !b.base_url) return send(400, { error: 'name 与 base_url 必填' });
+      if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
       if (app === 'codex' && !b.model) return send(400, { error: 'Codex 渠道必须填模型名' });
       const id = (app === 'codex' ? 'c' : 'p') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const prov = { id, name: String(b.name), base_url: String(b.base_url).replace(/\/+$/, ''),
@@ -433,7 +450,10 @@ function apiHandler(req, res) {
       if (req.method === 'PUT') {
         const b = JSON.parse((await readBody()) || '{}');
         if (b.name !== undefined) prov.name = String(b.name);
-        if (b.base_url !== undefined) prov.base_url = String(b.base_url).replace(/\/+$/, '');
+        if (b.base_url !== undefined) {
+          if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
+          prov.base_url = String(b.base_url).replace(/\/+$/, '');
+        }
         if (b.api_key) prov.api_key = String(b.api_key);          // 留空 = 不改动
         if (b.enabled !== undefined) prov.enabled = !!b.enabled;
         if (b.note !== undefined) prov.note = String(b.note);
@@ -527,7 +547,7 @@ if (require.main === module) {
 // 供测试与脚本复用;store/routes/current 经 _state 存取以保持闭包绑定
 module.exports = {
   VERSION, proxyHandler, apiHandler, listen,
-  resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr,
+  resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl,
   switchClaude, switchCodex, liveState, testProvider,
   _state: {
     get store() { return store; }, set store(v) { store = v; },

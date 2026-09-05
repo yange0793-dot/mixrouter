@@ -9,7 +9,7 @@ const path = require('node:path');
 // 隔离运行时数据目录,避免读到(更不能写到)仓库里的真实配置
 process.env.MIXR_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mixr-helpers-'));
 const {
-  VERSION, resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, _state,
+  VERSION, resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl, _state,
 } = require('../mixrouter.js');
 
 test('applyModel 无 [1M] 后缀时原样返回且不动 headers', () => {
@@ -100,6 +100,16 @@ test('resolveRoute 无命中时走 default,可覆盖模型', () => {
   assert.strictEqual(r.rule, null);
   assert.strictEqual(r.provider.id, 'p2');
   assert.strictEqual(r.model, 'fallback-model');
+});
+
+test('validBaseUrl 只收 http(s) URL', () => {
+  assert.strictEqual(validBaseUrl('https://api.example.com'), true);
+  assert.strictEqual(validBaseUrl('http://127.0.0.1:8787'), true);
+  assert.strictEqual(validBaseUrl('not-a-url'), false);
+  assert.strictEqual(validBaseUrl('ftp://x.example.com'), false);
+  assert.strictEqual(validBaseUrl('javascript:alert(1)'), false);
+  assert.strictEqual(validBaseUrl(''), false);
+  assert.strictEqual(validBaseUrl(null), false);
 });
 
 test('导出的 VERSION 与 package.json 一致', () => {
