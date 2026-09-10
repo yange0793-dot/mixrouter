@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // mixctl — mixrouter 管理命令
-//   start | stop | restart | status | ls | logs [n] | open | help
+//   start | stop | restart | status | ls | sessions | logs [n] | open | help
 'use strict';
 const { spawn, execSync } = require('child_process');
 const http = require('http');
@@ -61,10 +61,16 @@ async function ls() {
   let s;
   try { s = await api('/api/state'); } catch { return console.log('mixrouter 未运行或控制台不可达'); }
   const nameOf = id => { for (const g of ['claude', 'codex']) { const p = s.providers[g].find(x => x.id === id); if (p) return p.name + (p.enabled ? '' : '(停用)'); } return '(未绑定)'; };
-  console.log('路由(请求模型名子串 → Claude 渠道 @ 目标模型):');
+  // 目标既可能是单一渠道,也可能是渠道池(会话粘性分发),分开显示
+  const targetOf = r => {
+    const pool = (r.pool || []).map(m => typeof m === 'string' ? m : m.provider);
+    if (pool.length) return `池[${pool.map(nameOf).join(' | ')}] ${r.strategy}`;
+    return nameOf(r.provider);
+  };
+  console.log('路由(请求模型名子串 → 目标 @ 模型,prio 大者先匹配):');
   for (const r of s.routes.rules)
-    console.log(`  ${r.enabled ? ' ' : '#'} ${r.match || '(空)'}  →  ${nameOf(r.provider)}${r.model ? ' @ ' + r.model : ' @ 透传'}`);
-  console.log(`  兜底  →  ${nameOf(s.routes.default.provider)}${s.routes.default.model ? ' @ ' + s.routes.default.model : ' @ 透传'}`);
+    console.log(`  ${r.enabled ? ' ' : '#'} [p${Number(r.priority) || 0}] ${r.match || '(空)'}  →  ${targetOf(r)}${r.model ? ' @ ' + r.model : ' @ 透传'}`);
+  console.log(`  兜底 [p${Number(s.routes.default.priority) || 0}]  →  ${targetOf(s.routes.default)}${s.routes.default.model ? ' @ ' + s.routes.default.model : ' @ 透传'}`);
   const cur = s.current, live = s.live;
   console.log(`\nClaude Code 渠道 ${s.providers.claude.length} 个(当前生效 ${live.claude.base_url || '(未配置)'},${cur.claude ? '库内选中 ' + nameOf(cur.claude) + (live.claude.match ? ' ✓' : ' ⚠配置漂移') : '库内未选中'}):`);
   for (const p of s.providers.claude)
@@ -73,12 +79,32 @@ async function ls() {
   for (const p of s.providers.codex)
     console.log(`  ${cur.codex === p.id ? '*' : ' '} [${p.enabled ? '启用' : '停用'}] ${p.name}  ${p.base_url}  ${p.model} (${p.wire_api})`);
 }
+// 活跃对话:每个 Claude Code 会话当前锁在哪个渠道
+async function sessions() {
+  let s;
+  try { s = await api('/api/state'); } catch { return console.log('mixrouter 未运行或控制台不可达'); }
+  const list = s.sessions || [];
+  if (!list.length) return console.log('还没有活跃对话。经 127.0.0.1:8787 发起的 Claude Code 会话会出现在这里。');
+  console.log(`活跃对话 ${list.length} 个(会话 TTL ${s.session_ttl_min} 分钟,渠道冷却 ${s.cooldown_s} 秒):\n`);
+  console.log(`  ${'会话'.padEnd(12)}${'渠道'.padEnd(20)}${'请求'.padEnd(6)}${'最近活跃'.padEnd(11)}对话`);
+  for (const x of list) {
+    const ago = Math.max(0, Math.round((Date.now() - x.lastUsed) / 1000));
+    const seen = ago < 60 ? `${ago} 秒前` : ago < 3600 ? `${Math.floor(ago / 60)} 分前` : `${Math.floor(ago / 3600)} 小时前`;
+    const prov = x.provider_name + (x.pinned ? ' ★钉定' : '') + (x.cooldown ? ' ⚠冷却' : '');
+    console.log(`  ${String(x.short).padEnd(12)}${prov.padEnd(20)}${String(x.reqs).padEnd(6)}${seen.padEnd(11)}${x.label || '-'}`);
+  }
+  if (s.cooldowns && s.cooldowns.length) {
+    console.log('\n冷却中的渠道:');
+    for (const c of s.cooldowns) console.log(`  ${c.name}  还有 ${Math.max(0, Math.round((c.until - Date.now()) / 1000))} 秒`);
+  }
+}
+
 function logs(n = 20) {
   try {
     const lines = fs.readFileSync(REQ_LOG, 'utf8').trim().split('\n').slice(-Number(n));
     for (const l of lines) {
       const e = JSON.parse(l);
-      console.log(`${e.ts.slice(5, 19)}  ${String(e.provider).padEnd(16)} ${e.model_in} → ${e.model_out}  in ${e.in} out ${e.out}  ${e.ms}ms  ${e.status}${e.err ? '  ' + e.err : ''}`);
+      console.log(`${e.ts.slice(5, 19)}  ${String(e.session || '-').padEnd(10)}${String(e.provider).padEnd(16)} ${e.model_in} → ${e.model_out}  in ${e.in} out ${e.out}  ${e.ms}ms  ${e.status}${e.failover ? ' ↷转移' : ''}${e.err ? '  ' + e.err : ''}`);
     }
   } catch { console.log('暂无请求日志'); }
 }
@@ -89,6 +115,7 @@ else if (cmd === 'stop') stop();
 else if (cmd === 'restart') { const pid = getPid(); if (pid && alive(pid)) stop(); setTimeout(start, 600); }
 else if (cmd === 'status') status();
 else if (cmd === 'ls') ls();
+else if (cmd === 'sessions' || cmd === 'sess') sessions();
 else if (cmd === 'logs') logs(process.argv[3]);
 else if (cmd === 'open') execSync(`open http://127.0.0.1:${UI_PORT}`);
-else console.log(`用法: mixctl <start|stop|restart|status|ls|logs [n]|open>`);
+else console.log(`用法: mixctl <start|stop|restart|status|ls|sessions|logs [n]|open>`);

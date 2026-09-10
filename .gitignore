@@ -6,6 +6,13 @@ providers.json.tmp
 routes.json
 routes.json.tmp
 
+# 会话绑定(运行时状态,含对话标签=对话内容片段,绝不入库)
+sessions.json
+sessions.json.tmp
+
+# 客户端配置切换时留下的备份
+*.bak-mixui-*
+
 # 运行时产物
 logs/
 .run/

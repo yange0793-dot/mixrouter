@@ -5,9 +5,23 @@
 'use strict';
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-const db = process.argv[2] || '/Users/tufu/cc-switch-backup-20260801-002805/cc-switch.db';
+// 默认取家目录下最近一次 cc-switch 备份;也可以直接把 db 路径当第一个参数传进来
+function defaultDb() {
+  const home = os.homedir();
+  try {
+    const cands = fs.readdirSync(home)
+      .filter(f => /^cc-switch-backup-/.test(f))
+      .map(f => path.join(home, f, 'cc-switch.db'))
+      .filter(p => fs.existsSync(p))
+      .sort();
+    if (cands.length) return cands[cands.length - 1];
+  } catch {}
+  return path.join(home, 'cc-switch-backup', 'cc-switch.db');
+}
+const db = process.argv[2] || defaultDb();
 const out = process.argv[3] || path.join(__dirname, '..', 'providers.json');
 
 const rows = JSON.parse(execFileSync('sqlite3', ['-json', db,
