@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // ============================================================================
-// mixrouter v3.0 — 本地模型路由器 + cc-switch 式客户端配置切换
-//   :8787  代理端口  Anthropic 协议 /v1/messages,按路由规则改写模型转发到渠道
+// mixrouter v3.1 — 本地模型路由器 + cc-switch 式客户端配置切换
+//   :8787  代理端口  Claude 组:/v1/messages、count_tokens(Anthropic 协议)
+//                   Codex  组:/v1/responses、/v1/chat/completions(OpenAI 协议)
 //   :8788  控制台   渠道(Claude Code / Codex 两组)/ 路由 / 会话 / 日志
 // 零依赖,Node >= 18。数据文件:providers.json、routes.json、sessions.json
 //
 // v3 核心:同一个 Agent 的多个对话可以走不同渠道(key)
 //   Claude Code 每个对话都带 x-claude-code-session-id(metadata.user_id 里也有),
+//   Codex 0.154 每个请求都带 session-id / thread-id 头(body.prompt_cache_key 同值),
 //   代理以它为"对话"身份,把渠道池里的成员按会话粘性分配——每个对话锁一个渠道,
 //   对话内所有请求(含子代理、count_tokens)始终走同一个,不会中途换 key 打断缓存。
+//   Codex 上游若是只开 chat/completions 的网关,代理自动翻译协议(responses ⇄ chat)。
 // ============================================================================
 'use strict';
 const http = require('http');
@@ -18,7 +21,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -36,9 +39,16 @@ const TEST_TIMEOUT_MS = 15 * 1000;
 const BETA_1M = 'context-1m-2025-08-07';
 // agentrouter 等网关校验 UA 形态,裸 curl 一律 401;客户端没带 UA 时用它兜底
 const DEFAULT_UA = 'claude-cli/2.1.219 (external, cli)';
+// OpenAI 协议端点的兜底 UA(codex 自己带 codex_exec/… 或 codex_cli_rs/…,这个只兜非 codex 客户端)
+const DEFAULT_UA_CODEX = 'codex_cli_rs/0.154.0 (external, cli)';
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 const RING_SIZE = 500;
 const BACKUP_KEEP = 5;
+// 路由模式的客户端配置指向(代理不校验 token,仅占位——Codex 的 experimental_bearer_token 不能为空)
+const ROUTER_ID = '@router';
+const ROUTER_URL = `http://${HOST}:${PROXY_PORT}`;
+const ROUTER_TOKEN = 'mixrouter-local';
+const ROUTER_SECTION = 'mixr-router';
 // ---- v3 会话分发 ----
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 // 会话绑定空闲多久后失效(默认 12h);同一对话中途换渠道会打断 prompt 缓存,故给足
@@ -77,6 +87,7 @@ let current = { claude: null, codex: null };
 { const raw = loadJson(PROVIDERS_FILE, null); if (raw && raw.current) current = { ...current, ...raw.current }; }
 
 const saveStore = () => saveJson(PROVIDERS_FILE, { version: 2, current, claude: store.claude, codex: store.codex });
+const storeOf = app => (app === 'codex' ? store.codex : store.claude);
 const findProvider = id => store.claude.find(p => p.id === id) || store.codex.find(p => p.id === id) || null;
 const providerApp = id => store.claude.some(p => p.id === id) ? 'claude' : (store.codex.some(p => p.id === id) ? 'codex' : null);
 
@@ -86,6 +97,7 @@ const providerApp = id => store.claude.some(p => p.id === id) ? 'claude' : (stor
 //   pool     渠道池,元素为渠道 id 或 {provider, model, weight}
 //   strategy round_robin(默认) | weighted | least_used | random
 //   priority 数值大者先匹配(默认 0);同值按数组顺序
+//   app      适用客户端组 claude | codex;留空 = 两组通用(池成员按组自动取舍)
 //   when     附加匹配条件,全部满足才命中:{ session, ua, token } 均为子串
 const defaultRoutes = () => ({
   rules: [
@@ -128,14 +140,15 @@ function normalizeRule(r) {
     pool,
     strategy: STRATEGIES.includes(src.strategy) ? src.strategy : 'round_robin',
     priority: Number.isFinite(p) ? p : 0,
+    app: src.app === 'codex' ? 'codex' : (src.app === 'claude' ? 'claude' : ''),
     when,
     enabled: src.enabled !== false,
   };
 }
 
 // ---------------------------------------------------------------- 会话身份
-// "对话"= 一个 Claude Code 会话。优先用官方头,其次 metadata.user_id 里的 session_id,
-// 都没有(非 CC 客户端)就用 system + 首条用户消息的内容指纹兜底,保证同一对话稳定归组。
+// "对话"= 一个客户端会话。优先用官方头,其次请求体里的会话字段,
+// 都没有(自定义客户端)就用 system/instructions + 首条用户消息的内容指纹兜底。
 function parseSessionId(raw) {
   const s = String(raw || '').trim();
   if (!s) return '';
@@ -165,8 +178,57 @@ function firstUserText(body) {
   }
   return '';
 }
-// 返回 { key, kind }:kind 标明身份是怎么来的,便于日志排查
-function sessionIdentity(req, body) {
+// ---- Codex(OpenAI 协议)侧的会话身份 ----
+// 实测 codex-cli 0.154:每个请求都带 session-id / thread-id / x-client-request-id(同一个 UUID),
+// 请求体里 prompt_cache_key 同值,client_metadata.session_id 与 x-codex-turn-metadata 里也各有一份
+function codexHeaderSessionId(req) {
+  for (const h of ['session-id', 'thread-id', 'x-client-request-id']) {
+    const v = String(req.headers[h] || '').trim();
+    if (v) return v;
+  }
+  const tm = String(req.headers['x-codex-turn-metadata'] || '').trim();
+  if (tm.startsWith('{')) { try { return String(JSON.parse(tm).session_id || '').trim(); } catch {} }
+  return '';
+}
+function codexBodySessionId(body) {
+  const direct = String((body && body.prompt_cache_key) || '').trim();
+  if (direct) return direct;
+  const cm = body && body.client_metadata;
+  if (cm && typeof cm === 'object' && cm.session_id) return String(cm.session_id).trim();
+  return '';
+}
+function codexSystemText(body) { return (body && typeof body.instructions === 'string') ? body.instructions : ''; }
+// Codex 的 input 是 items 数组;把 role=user 的文本都取出来
+function codexUserTexts(body) {
+  const input = body && body.input;
+  const out = [];
+  if (typeof input === 'string') out.push(input);
+  if (Array.isArray(input)) for (const it of input) {
+    if (!it || it.type !== 'message' || it.role !== 'user') continue;
+    const c = it.content;
+    if (typeof c === 'string') { out.push(c); continue; }
+    if (Array.isArray(c)) {
+      const t = c.filter(b => b && (b.type === 'input_text' || b.type === 'text') && b.text).map(b => b.text).join('');
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+// 指纹与标签都用首条用户文本(跨轮稳定):Codex 每轮把历史消息整体重发,首条不变
+function codexFirstUserText(body) { return codexUserTexts(body)[0] || ''; }
+
+// 返回 { key, kind }:kind 标明身份是怎么来的,便于日志排查。
+// key 带来源前缀(cc/cx = 官方会话 id,fp/cxf = 内容指纹),两种客户端永不撞车
+function sessionIdentity(req, body, app = 'claude') {
+  if (app === 'codex') {
+    const header = codexHeaderSessionId(req);
+    if (header) return { key: 'cx:' + header, kind: 'header' };
+    const meta = codexBodySessionId(body);
+    if (meta) return { key: 'cx:' + meta, kind: 'metadata' };
+    const seed = codexSystemText(body) + '\u0000' + codexFirstUserText(body);
+    if (!seed.replace(/\u0000/g, '').trim()) return { key: 'cx-anon', kind: 'anon' };
+    return { key: 'cxf:' + crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16), kind: 'fingerprint' };
+  }
   const header = parseSessionId(req.headers['x-claude-code-session-id']);
   if (header) return { key: 'cc:' + header, kind: 'header' };
   const meta = body && body.metadata && parseSessionId(body.metadata.user_id);
@@ -176,8 +238,16 @@ function sessionIdentity(req, body) {
   return { key: 'fp:' + crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16), kind: 'fingerprint' };
 }
 // 会话标签:优先 system prompt 里的工作目录(CC 的 <env> 块),否则首条用户消息
-function sessionLabel(body) {
+function sessionLabel(body, app = 'claude') {
   if (!SESSION_LABEL) return '';
+  if (app === 'codex') {
+    // Codex 会在用户消息前面塞 <environment_context> / <user_instructions> 这类注入块,
+    // 标签要跳过它们,取第一句真人话;全是注入块时才退回第一块
+    const texts = codexUserTexts(body);
+    const human = texts.find(t => !/^\s*</.test(t)) || texts[0] || '';
+    const t = human.replace(/\s+/g, ' ').trim();
+    return t ? t.slice(0, 60) : '';
+  }
   const sys = bodySystemText(body);
   const wd = sys.match(/Working directory:\s*(\S+)/) || sys.match(/<cwd>([^<]+)<\/cwd>/);
   if (wd) return wd[1].replace(/^\/(?:Users|home)\/[^/]+/, '~');
@@ -218,8 +288,8 @@ function saveSessionsSoon() {
   }, 1000);
   if (sessionsTimer.unref) sessionsTimer.unref();
 }
-// 日志/控制台里显示的短 id:去掉来源前缀再取前 8 位,和 Claude Code 自己显示的会话号对得上
-const sessionKeyOf = k => String(k || '').replace(/^(cc|fp):/, '').slice(0, 8);
+// 日志/控制台里显示的短 id:去掉来源前缀再取前 8 位,和客户端自己显示的会话号对得上
+const sessionKeyOf = k => String(k || '').replace(/^(?:cc|fp|cx|cxf):/, '').slice(0, 8);
 
 function pruneSessions() {
   const now = Date.now();
@@ -239,27 +309,42 @@ function markCooldown(providerId, status) {
 }
 const inCooldown = id => (cooldowns[id] || 0) > Date.now();
 
-// 把规则的 pool 归一化成 [{provider, model, weight}]
+// 把规则的 pool 归一化成 [{provider, model, weight}],只取本组(app)的渠道
 // 池成员里"不存在/已停用"的直接跳过(池的意义就是自动绕开不可用的);
 // 但单一 provider 目标即使停用也保留成成员——好让调用方给出 provider_disabled_error
 // 而不是含混的 no_route_error
-function poolMembers(rule) {
+function poolMembers(rule, app = 'claude') {
+  const group = storeOf(app);
   const raw = (rule && Array.isArray(rule.pool)) ? rule.pool : [];
   const out = [];
   for (const m of raw) {
     const id = typeof m === 'string' ? m : (m && m.provider);
     if (!id) continue;
-    const p = store.claude.find(x => x.id === id);
+    const p = group.find(x => x.id === id);
     if (!p || p.enabled === false) continue;
-    const model = typeof m === 'object' && m && m.model ? m.model : (rule.model || '');
+    // Codex 渠道自己就带模型名,池成员/规则没写就用它;Claude 侧是"留空即透传请求模型"
+    const model = (typeof m === 'object' && m && m.model) ? m.model
+      : (app === 'codex' ? (rule.model || p.model || '') : (rule.model || ''));
     const weight = typeof m === 'object' && m && Number(m.weight) > 0 ? Number(m.weight) : 1;
     out.push({ provider: p, model, weight });
   }
   if (!out.length && rule && rule.provider) {
-    const p = store.claude.find(x => x.id === rule.provider);
-    if (p) out.push({ provider: p, model: rule.model || '', weight: 1 });
+    const p = group.find(x => x.id === rule.provider);
+    if (p) out.push({ provider: p, model: app === 'codex' ? (rule.model || p.model || '') : (rule.model || ''), weight: 1 });
   }
   return out;
+}
+// 规则是否属于这一组。显式声明了 app 的规则只在自己那组生效;
+// 没声明时:Claude 通路保持原语义(命中的规则即使没绑定渠道也照旧报错,
+// 好让控制台里"渠道被删了"这种情况有明确提示);Codex 通路则把"整条规则只绑了另一组渠道"
+// 视为不命中,好让后面的 Codex 规则/默认路由接手,而不是被一条 Claude 规则挡住
+function ruleBelongsToApp(rule, app) {
+  if (rule && rule.app) return rule.app === app;
+  if (app !== 'codex') return true;
+  const ids = [rule && rule.provider, ...((rule && rule.pool) || []).map(m => typeof m === 'string' ? m : (m && m.provider))]
+    .filter(Boolean);
+  if (!ids.length) return true;
+  return ids.some(id => providerApp(id) === null || providerApp(id) === app);
 }
 const strategyOf = rule => STRATEGIES.includes(rule && rule.strategy) ? rule.strategy : 'round_robin';
 
@@ -316,7 +401,7 @@ function pickMember(rule, members, key) {
 }
 
 // 拿到本会话该走的渠道:已有绑定且渠道仍可用 → 复用(粘性);否则挑一个并绑定
-function resolveSessionTarget(rule, members, key, label, kind) {
+function resolveSessionTarget(rule, members, key, label, kind, app = 'claude') {
   pruneSessions();
   const now = Date.now();
   const bound = sessions.get(key);
@@ -324,7 +409,7 @@ function resolveSessionTarget(rule, members, key, label, kind) {
   if (bound) {
     // 手动钉定压过策略:哪怕这个渠道不在池里也照走——钉定的意义就是"这个对话我要它走这里"
     if (bound.pinned) {
-      const p = store.claude.find(x => x.id === bound.providerId);
+      const p = storeOf(app).find(x => x.id === bound.providerId);
       if (p && p.enabled !== false && !inCooldown(bound.providerId)) {
         touch();
         return { member: { provider: p, model: bound.model || (rule && rule.model) || '', weight: 1 }, sticky: true, rebind: false };
@@ -340,13 +425,14 @@ function resolveSessionTarget(rule, members, key, label, kind) {
   return { member: picked, sticky: !!bound, rebind: true };
 }
 
-const sessionEntry = (key, kind, members, label) => {
+const sessionEntry = (key, kind, members, label, app = 'claude') => {
   let s = sessions.get(key);
   if (!s) {
-    s = { providerId: '', model: '', ruleId: '', label: label || '', kind, created: Date.now(), lastUsed: Date.now(), reqs: 0, inTok: 0, outTok: 0, pinned: false };
+    s = { app, providerId: '', model: '', ruleId: '', label: label || '', kind, created: Date.now(), lastUsed: Date.now(), reqs: 0, inTok: 0, outTok: 0, pinned: false };
     sessions.set(key, s);
   }
   if (kind && s.kind !== kind) s.kind = kind;
+  if (!s.app) s.app = app;
   applyLabel(s, label);
   return s;
 };
@@ -359,7 +445,7 @@ function sessionList() {
   const out = [];
   for (const [k, v] of sessions) {
     const p = v.providerId ? findProvider(v.providerId) : null;
-    out.push({ key: k, short: sessionKeyOf(k), kind: v.kind || '', label: v.label || '',
+    out.push({ key: k, short: sessionKeyOf(k), app: v.app || 'claude', kind: v.kind || '', label: v.label || '',
       provider: v.providerId || '', provider_name: p ? p.name : '', model: v.model || '',
       rule: v.ruleId || '', reqs: v.reqs || 0, inTok: v.inTok || 0, outTok: v.outTok || 0,
       created: v.created || 0, lastUsed: v.lastUsed || 0, pinned: !!v.pinned,
@@ -394,7 +480,7 @@ function todayStats() {
 // ---------------------------------------------------------------- 路由解析
 // match 为请求模型名的子串,逗号分隔多个,大小写不敏感
 // 先按 priority 降序(同值保持数组顺序),命中首个启用且满足 when 的规则
-// 路由目标只能是 Claude Code 组的渠道(代理只说 Anthropic 协议)
+// 路由目标来自哪一组由端点决定:Anthropic 端点取 Claude 组,OpenAI 端点取 Codex 组
 function matchWhen(rule, ctx) {
   const w = (rule && rule.when) || {};
   for (const field of ['session', 'ua', 'token']) {
@@ -404,7 +490,7 @@ function matchWhen(rule, ctx) {
   }
   return true;
 }
-function resolveRoute(modelIn, ctx = {}) {
+function resolveRoute(modelIn, ctx = {}, app = 'claude') {
   const m = String(modelIn || '').toLowerCase();
   const order = routes.rules
     .map((r, i) => ({ r, i }))
@@ -413,13 +499,14 @@ function resolveRoute(modelIn, ctx = {}) {
     if (!r.enabled) continue;
     const hits = String(r.match || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     if (!hits.length || !hits.some(h => m.includes(h))) continue;
+    if (!ruleBelongsToApp(r, app)) continue;
     if (!matchWhen(r, ctx)) continue;
-    const members = poolMembers(r);
+    const members = poolMembers(r, app);
     return { rule: r, members, provider: members.length ? members[0].provider : null,
       model: (members.length ? members[0].model : r.model) || modelIn, strategy: strategyOf(r) };
   }
   const d = routes.default || {};
-  const members = poolMembers(d);
+  const members = poolMembers(d, app);
   return { rule: null, members, provider: members.length ? members[0].provider : null,
     model: (members.length ? members[0].model : d.model) || modelIn, strategy: strategyOf(d) };
 }
@@ -441,6 +528,16 @@ function anthropicError(res, status, type, message) {
   res.end(body);
 }
 
+// OpenAI 端点(Codex)要 OpenAI 形状的错误体,回 Anthropic 形状它只会打印一句无法解析的报错
+function openaiError(res, status, type, message) {
+  const body = JSON.stringify({ error: { message, type: String(type).replace(/_error$/, ''), code: type } });
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+  res.end(body);
+}
+// 按端点协议选错误体
+const protoError = (res, app, status, type, message) =>
+  app === 'codex' ? openaiError(res, status, type, message) : anthropicError(res, status, type, message);
+
 // HTTP 头只允许 latin-1:渠道名等注入头之前消洗掉非 ASCII,避免 ERR_INVALID_CHAR 打崩进程
 const safeHeader = s => String(s ?? '').replace(/[^\x20-\x7E]/g, '').trim();
 
@@ -459,21 +556,296 @@ function extractUsage(text) {
   return u;
 }
 
+// 取文本里该字段"最后一次"出现的值(OpenAI 系的 usage 在流的末尾才齐;中途事件可能带旧值)
+function lastNum(text, re) {
+  const g = new RegExp(re.source, 'g');
+  let m, v = 0;
+  while ((m = g.exec(text)) !== null) v = Number(m[1]);
+  return v;
+}
+// OpenAI 两种协议的 usage 抽取(流式累积文本与整包 JSON 都适用)
+//   responses: input_tokens / output_tokens / input_tokens_details.cached_tokens
+//   chat:      prompt_tokens / completion_tokens / prompt_tokens_details.cached_tokens
+function extractUsageOpenAI(kind, text) {
+  const u = kind === 'responses'
+    ? { in: lastNum(text, /"input_tokens"\s*:\s*(\d+)/), out: lastNum(text, /"output_tokens"\s*:\s*(\d+)/) }
+    : { in: lastNum(text, /"prompt_tokens"\s*:\s*(\d+)/), out: lastNum(text, /"completion_tokens"\s*:\s*(\d+)/) };
+  u.cache_read = lastNum(text, /"cached_tokens"\s*:\s*(\d+)/);
+  return u;
+}
+const extractUsageFor = (wire, text) => wire === 'anthropic' ? extractUsage(text) : extractUsageOpenAI(wire, text);
+
+// ---------------------------------------------------------------- OpenAI 协议翻译(responses ⇄ chat)
+// Codex 只说 /v1/responses;上游若只开 chat/completions(如 GLM 系网关),由代理现场翻译。
+// 逻辑来自本机实战过的独立代理,踩过的坑照旧:首个文本 delta 之前必须先发 output_item.added,
+// 否则 codex 报 "OutputTextDelta without active item";工具调用整包下发即可,分片增量非必需。
+const randId = prefix => prefix + crypto.randomBytes(8).toString('hex');
+
+function chatImagePart(b) {
+  const url = b.image_url_data_url || b.image_url || b.url;
+  if (typeof url !== 'string' || !url) return null;
+  if (typeof b.image_url === 'object' && b.image_url && b.image_url.url) return { type: 'image_url', image_url: { url: b.image_url.url } };
+  return { type: 'image_url', image_url: { url } };
+}
+// 一条 responses input item → 若干条 chat messages(就地 push)
+function itemToChatMessages(item, messages, opts) {
+  if (typeof item === 'string') { messages.push({ role: 'user', content: item }); return; }
+  if (!item || typeof item !== 'object') return;
+  switch (item.type) {
+    case 'message': {
+      const role = item.role === 'developer' ? 'system' : (item.role || 'user');
+      const c = item.content;
+      if (typeof c === 'string') { messages.push({ role, content: c }); return; }
+      if (!Array.isArray(c)) { messages.push({ role, content: '' }); return; }
+      const texts = [], images = [];
+      for (const b of c) {
+        if (typeof b === 'string') { texts.push(b); continue; }
+        if (!b) continue;
+        if (b.type === 'input_text' || b.type === 'output_text' || b.type === 'text') texts.push(b.text || '');
+        else if (b.type === 'input_image' || b.type === 'image_url') {
+          const part = chatImagePart(b);
+          if (part && !opts.dropImages) images.push(part);
+          else texts.push('[图片:该渠道按配置丢弃图片,模型看不到它]');
+        }
+      }
+      const content = images.length
+        ? [...(texts.length ? [{ type: 'text', text: texts.join('\n') }] : []), ...images]
+        : texts.join('\n');
+      messages.push({ role, content });
+      return;
+    }
+    case 'function_call':
+      // 助手上一轮的工具调用 → assistant.tool_calls
+      messages.push({ role: 'assistant', content: '',
+        tool_calls: [{ id: item.call_id || item.id || randId('call_'), type: 'function',
+          function: { name: item.name || '', arguments: item.arguments || '{}' } }] });
+      return;
+    case 'function_call_output': {
+      let out = item.output;
+      // 个别客户端把 output 包成 {content:[{text}]} 对象
+      if (out && typeof out === 'object' && Array.isArray(out.content)) out = out.content.map(b => (b && b.text) || '').join('\n');
+      if (typeof out !== 'string') out = JSON.stringify(out === undefined ? '' : out);
+      messages.push({ role: 'tool', tool_call_id: item.call_id || item.id || '', content: out });
+      return;
+    }
+    case 'reasoning':
+    case 'reasoning_summary':
+      return;  // chat 协议不认 reasoning item,丢弃(模型每轮自行思考)
+    default:
+      return;  // 未知 item(local_shell_call / web_search_call / computer_call 等)忽略,避免上游 400
+  }
+}
+// responses 工具选择 → chat 形状(Codex 默认发字符串 "auto")
+function chatToolChoice(tc) {
+  if (!tc || typeof tc !== 'object') return tc === undefined ? 'auto' : tc;
+  if (tc.type === 'function' && tc.name) return { type: 'function', function: { name: tc.name } };
+  if (tc.type === 'function' && tc.function) return tc;
+  return 'auto';
+}
+// 请求方向:responses → chat/completions
+function responsesToChat(body, provider) {
+  const messages = [];
+  if (body.instructions) messages.push({ role: 'system', content: String(body.instructions) });
+  const input = body.input;
+  if (Array.isArray(input)) for (const it of input) itemToChatMessages(it, messages, { dropImages: !!(provider && provider.drop_images) });
+  else if (typeof input === 'string') messages.push({ role: 'user', content: input });
+  if (!messages.some(m => m.role === 'user')) messages.push({ role: 'user', content: '(empty request)' });
+
+  const out = { model: body.model, messages, stream: body.stream !== false };
+  if (body.max_output_tokens) out.max_tokens = body.max_output_tokens;
+  if (body.temperature != null) out.temperature = body.temperature;
+  if (out.stream) out.stream_options = { include_usage: true };  // 统计需要 usage,得主动要
+  if (Array.isArray(body.tools) && body.tools.length) {
+    const tools = body.tools
+      .filter(t => t && t.type === 'function' && t.name)
+      .map(t => ({ type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} } } }));
+    if (tools.length) {
+      out.tools = tools;
+      if (body.tool_choice != null) out.tool_choice = chatToolChoice(body.tool_choice);
+      if (body.parallel_tool_calls != null) out.parallel_tool_calls = body.parallel_tool_calls;
+    }
+  }
+  return out;
+}
+const responsesUsage = u => {
+  const cached = (u && u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
+  return {
+    input_tokens: (u && u.prompt_tokens) || 0,
+    output_tokens: (u && u.completion_tokens) || 0,
+    total_tokens: (u && u.total_tokens) || 0,
+    ...(cached ? { input_tokens_details: { cached_tokens: cached } } : {}),
+  };
+};
+// 响应方向(非流式):chat JSON → responses JSON
+function chatJsonToResponses(j, model) {
+  const msg = ((j && j.choices && j.choices[0]) || {}).message || {};
+  const output = [];
+  if (msg.content) output.push({ type: 'message', id: randId('msg_'), role: 'assistant', status: 'completed',
+    content: [{ type: 'output_text', text: String(msg.content), annotations: [] }] });
+  for (const [i, tc] of (msg.tool_calls || []).entries()) {
+    output.push({ type: 'function_call', id: 'fc_' + i, call_id: tc.id || ('call_' + i),
+      name: (tc.function && tc.function.name) || '', arguments: (tc.function && tc.function.arguments) || '{}', status: 'completed' });
+  }
+  return { id: (j && j.id) || randId('resp_'), object: 'response', status: 'completed', model, output, usage: responsesUsage(j && j.usage) };
+}
+// 把一个完整的 responses 对象摊成 SSE 事件序列(客户端要流式、上游却整包回了 JSON 时用)
+function emitResponsesSse(res, resp, extraHeaders) {
+  const sse = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch {} };
+  // 注意顺序:extraHeaders 里带着上游的 Content-Type(可能是 application/json),必须让它先铺、再由我们盖掉
+  res.writeHead(200, { ...(extraHeaders || {}), 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  sse({ type: 'response.created', response: { id: resp.id, object: 'response', status: 'in_progress', model: resp.model, output: [] } });
+  (resp.output || []).forEach((item, i) => {
+    sse({ type: 'response.output_item.added', output_index: i, item: { ...item, status: 'in_progress', content: item.type === 'message' ? [] : undefined } });
+    if (item.type === 'message') {
+      const text = ((item.content || [])[0] || {}).text || '';
+      sse({ type: 'response.content_part.added', item_id: item.id, output_index: i, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
+      if (text) sse({ type: 'response.output_text.delta', item_id: item.id, output_index: i, content_index: 0, delta: text });
+      sse({ type: 'response.output_text.done', item_id: item.id, output_index: i, content_index: 0, text });
+      sse({ type: 'response.content_part.done', item_id: item.id, output_index: i, content_index: 0, part: { type: 'output_text', text, annotations: [] } });
+    }
+    sse({ type: 'response.output_item.done', output_index: i, item });
+  });
+  sse({ type: 'response.completed', response: resp });
+  try { res.end(); } catch {}
+}
+// 响应方向(流式):chat SSE → responses SSE。onUsage 收尾时回报 usage(给日志/统计)
+function streamChatAsResponses(cres, res, model, onUsage, extraHeaders) {
+  const sse = obj => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch {} };
+  // 注意顺序:extraHeaders 里带着上游的 Content-Type,必须让它先铺、再由我们盖掉
+  res.writeHead(200, { ...(extraHeaders || {}), 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  const respId = randId('resp_'), itemId = randId('msg_');
+  sse({ type: 'response.created', response: { id: respId, object: 'response', status: 'in_progress', model, output: [] } });
+
+  let text = '', buffer = '', usage = null, finished = false, itemSent = false;
+  const toolCalls = new Map();  // index -> {id, name, args}
+
+  const ensureItem = () => {
+    if (itemSent) return;
+    itemSent = true;
+    sse({ type: 'response.output_item.added', output_index: 0,
+      item: { type: 'message', id: itemId, role: 'assistant', status: 'in_progress', content: [] } });
+    sse({ type: 'response.content_part.added', item_id: itemId, output_index: 0, content_index: 0,
+      part: { type: 'output_text', text: '', annotations: [] } });
+  };
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    const output = [];
+    if (text) {
+      ensureItem();
+      sse({ type: 'response.output_text.done', item_id: itemId, output_index: 0, content_index: 0, text });
+      sse({ type: 'response.content_part.done', item_id: itemId, output_index: 0, content_index: 0,
+        part: { type: 'output_text', text, annotations: [] } });
+      const item = { type: 'message', id: itemId, role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text, annotations: [] }] };
+      sse({ type: 'response.output_item.done', output_index: 0, item });
+      output.push(item);
+    }
+    for (const [i, tc] of toolCalls) {
+      const idx = output.length;
+      const item = { type: 'function_call', id: 'fc_' + respId + '_' + i, call_id: tc.id || ('call_' + respId + '_' + i),
+        name: tc.name, arguments: tc.args || '{}', status: 'completed' };
+      sse({ type: 'response.output_item.added', output_index: idx, item: { ...item, status: 'in_progress' } });
+      sse({ type: 'response.output_item.done', output_index: idx, item });
+      output.push(item);
+    }
+    sse({ type: 'response.completed', response: { id: respId, object: 'response', status: 'completed', model, output, usage: responsesUsage(usage) } });
+    if (onUsage) onUsage(responsesUsage(usage));
+    try { res.end(); } catch {}
+  };
+
+  cres.on('data', chunk => {
+    buffer += chunk.toString('utf8');
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') { finish(); return; }
+      let data;
+      try { data = JSON.parse(payload); } catch { continue; }
+      if (data.usage) usage = data.usage;
+      const delta = ((data.choices || [])[0] || {}).delta;
+      if (!delta) continue;
+      if (delta.content) {
+        ensureItem();
+        text += delta.content;
+        sse({ type: 'response.output_text.delta', item_id: itemId, output_index: 0, content_index: 0, delta: delta.content });
+      }
+      for (const tc of (Array.isArray(delta.tool_calls) ? delta.tool_calls : [])) {
+        const idx = tc.index ?? 0;
+        const acc = toolCalls.get(idx) || { id: '', name: '', args: '' };
+        if (tc.id) acc.id = tc.id;
+        if (tc.function && tc.function.name) acc.name = tc.function.name;
+        if (tc.function && tc.function.arguments) acc.args += tc.function.arguments;
+        toolCalls.set(idx, acc);
+      }
+    }
+  });
+  cres.on('end', finish);
+  cres.on('error', finish);
+}
+
 // ---------------------------------------------------------------- 代理服务
+// 端点 → 客户端组与协议:Claude 组说 Anthropic,Codex 组说 OpenAI
+const ENDPOINTS = [
+  { re: /^\/v1\/messages\/?$/, app: 'claude', kind: 'messages', path: '/v1/messages' },
+  { re: /^\/v1\/messages\/count_tokens\/?$/, app: 'claude', kind: 'count_tokens', path: '/v1/messages/count_tokens' },
+  { re: /^\/v1\/responses\/?$/, app: 'codex', kind: 'responses', path: '/v1/responses' },
+  { re: /^\/v1\/chat\/completions\/?$/, app: 'codex', kind: 'chat/completions', path: '/v1/chat/completions' },
+];
+function classifyProxyRequest(req) {
+  const p = String(req.url || '').split('?')[0];
+  for (const e of ENDPOINTS) if (e.re.test(p)) return e;
+  return null;
+}
+// 本渠道对这次请求该说哪种协议:Claude 组固定 Anthropic;Codex 组按渠道的 wire_api
+// (都是 responses:原样转发;chat:只开 completions 的网关,由代理现场翻译)
+const wireOf = (provider, app) => app === 'claude' ? 'anthropic' : (provider.wire_api === 'chat' ? 'chat' : 'responses');
+const upstreamPathOf = (wire, ep) => wire === 'anthropic' ? ep.path : (wire === 'chat' ? '/v1/chat/completions' : '/v1/responses');
+
+// GET /v1/models:只读清单(Codex 组渠道的模型 + 路由目标模型),给会探模型的客户端用
+function modelList() {
+  const seen = new Set(), data = [];
+  const add = (id, owner) => {
+    const k = id + '\u0000' + owner;
+    if (!id || seen.has(k)) return;
+    seen.add(k);
+    data.push({ id, object: 'model', owned_by: owner });
+  };
+  for (const p of store.codex) if (p.enabled !== false && p.model) add(p.model, p.name);
+  for (const r of [...(routes.rules || []), routes.default || {}]) {
+    if (!r) continue;
+    if (r.model) add(r.model, 'route');
+    for (const m of r.pool || []) if (typeof m === 'object' && m && m.model) add(m.model, 'route');
+  }
+  return { object: 'list', data };
+}
+
 function proxyHandler(req, res) {
-  if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/')) {
+  const pathOnly = String(req.url || '').split('?')[0];
+  if (req.method === 'GET' && (pathOnly === '/healthz' || pathOnly === '/')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ok: true, service: 'mixrouter', version: VERSION }));
   }
-  const isMessages = req.method === 'POST' && /^\/v1\/messages\/?$/.test(req.url.split('?')[0]);
-  const isCount = req.method === 'POST' && /^\/v1\/messages\/count_tokens\/?$/.test(req.url.split('?')[0]);
-  if (!isMessages && !isCount) return anthropicError(res, 404, 'not_found_error', `mixrouter 只支持 POST /v1/messages (与 count_tokens),收到 ${req.method} ${req.url}`);
+  // 客户端探活:HEAD 四个端点都回 200;GET /v1/models 给个只读模型清单
+  if (req.method === 'HEAD' && ENDPOINTS.some(e => e.re.test(pathOnly))) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end();
+  }
+  if (req.method === 'GET' && pathOnly === '/v1/models') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(modelList()));
+  }
+  const ep = classifyProxyRequest(req);
+  if (!ep) return protoError(res, 'claude', 404, 'not_found_error',
+    `mixrouter 支持 POST /v1/messages、/v1/messages/count_tokens(Claude)与 /v1/responses、/v1/chat/completions(Codex),收到 ${req.method} ${req.url}`);
 
   const chunks = []; let size = 0; let rejected = false;
   const overLimit = () => {
     if (rejected) return;
     rejected = true;
-    try { if (!res.headersSent) anthropicError(res, 413, 'invalid_request_error', `请求体超过 ${Math.floor(BODY_LIMIT / 1024 / 1024)}MB 上限`); } catch {}
+    try { if (!res.headersSent) protoError(res, ep.app, 413, 'invalid_request_error', `请求体超过 ${Math.floor(BODY_LIMIT / 1024 / 1024)}MB 上限`); } catch {}
     // 不炸 socket:继续排水丢弃剩余数据,让 413 干净送达(炸连接会让客户端只看到 EPIPE)
     req.removeAllListeners('data');
     req.resume();
@@ -483,37 +855,49 @@ function proxyHandler(req, res) {
     if (rejected) return;
     let body;
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { return anthropicError(res, 400, 'invalid_request_error', '请求体不是合法 JSON'); }
+    catch { return protoError(res, ep.app, 400, 'invalid_request_error', '请求体不是合法 JSON'); }
 
     const modelIn = body.model || '';
-    const ident = sessionIdentity(req, body);
-    const label = sessionLabel(body);
+    const ident = sessionIdentity(req, body, ep.app);
+    const label = sessionLabel(body, ep.app);
     const resolved = resolveRoute(modelIn, {
       session: ident.key, ua: req.headers['user-agent'], token: clientToken(req),
-    });
-    const members = resolved.members;
-    if (!members.length) return anthropicError(res, 503, 'no_route_error', `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
+    }, ep.app);
     // 单一目标停用 → 明确分型(池会自动跳过停用成员,不会落到这)
-    if (members.length === 1 && members[0].provider.enabled === false)
-      return anthropicError(res, 503, 'provider_disabled_error', `路由命中的渠道 "${members[0].provider.name}" 已停用`);
+    if (resolved.members.length === 1 && resolved.members[0].provider.enabled === false)
+      return protoError(res, ep.app, 503, 'provider_disabled_error', `路由命中的渠道 "${resolved.members[0].provider.name}" 已停用`);
+    // chat 协议客户端只能落到 chat 上游;responses 客户端两种上游都能落(chat 上游由代理翻译)
+    let members = resolved.members;
+    if (ep.kind === 'chat/completions' && members.length) {
+      const chatOnly = members.filter(m => wireOf(m.provider, ep.app) === 'chat');
+      if (!chatOnly.length) return protoError(res, ep.app, 400, 'wire_api_mismatch_error',
+        '路由命中的 Codex 渠道都是 responses 协议,收不了 /v1/chat/completions;把渠道 wire_api 改成 chat,或让客户端改用 /v1/responses');
+      members = chatOnly;
+    }
+    if (!members.length) return protoError(res, ep.app, 503, 'no_route_error', ep.app === 'codex'
+      ? `模型 "${modelIn}" 没有匹配的 Codex 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 的「路由」页为它配目标(要选 Codex 组渠道)`
+      : `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
 
     // 本会话锁定的渠道优先,其余池成员依次作后备(只在还没给客户端写字节时才会换)
-    const target = resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind);
-    const sess = sessionEntry(ident.key, ident.kind, members, label);
+    const target = resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind, ep.app);
+    const sess = sessionEntry(ident.key, ident.kind, members, label, ep.app);
     const wasSticky = target.sticky && !target.rebind;
     const ordered = [target.member]
       .concat(members.filter(m => m.provider.id !== target.member.provider.id))
       .slice(0, Math.max(1, MAX_ATTEMPTS));
 
     const started = Date.now();
-    const entry = { ts: new Date().toISOString(), provider: '', model_in: modelIn, model_out: '',
+    const entry = { ts: new Date().toISOString(), app: ep.app, provider: '', model_in: modelIn, model_out: '',
       session: sessionKeyOf(ident.key), session_kind: ident.kind, rule: (resolved.rule && resolved.rule.id) || 'default',
       pool: members.length, strategy: resolved.strategy, sticky: wasSticky, attempts: 0, failover: false,
       in: 0, out: 0, cache_read: 0, ms: 0, status: 0, stream: !!body.stream,
-      kind: isCount ? 'count_tokens' : 'messages', err: '' };
+      kind: ep.kind, wire: '', err: '' };
 
     // 单次请求的收尾:计数入会话、写日志、收响应(所有终止路径都走这里,避免漏记)
+    let finalized = false;
     const finalize = () => {
+      if (finalized) return;
+      finalized = true;
       sess.reqs = (sess.reqs || 0) + 1;
       sess.inTok = (sess.inTok || 0) + (entry.in || 0);
       sess.outTok = (sess.outTok || 0) + (entry.out || 0);
@@ -523,19 +907,24 @@ function proxyHandler(req, res) {
     };
     const sendErr = (status, type, message) => {
       entry.status = status;
-      if (!res.headersSent) anthropicError(res, status, type, message);
+      if (!res.headersSent) protoError(res, ep.app, status, type, message);
       else { try { res.end(); } catch {} }
     };
 
     function tryCandidate(i) {
       const member = ordered[i];
       const provider = member.provider;
-      const headers = buildUpstreamHeaders(provider, req);
-      const model = applyModel(member.model || modelIn, headers);
-      const outBody = JSON.stringify({ ...body, model });
+      const wire = wireOf(provider, ep.app);
+      const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, body.stream !== false);
+      // [1M] 后缀与 beta 头只对 Anthropic 上游有意义
+      const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : (member.model || modelIn);
+      const outBody = (wire === 'chat' && ep.kind === 'responses')
+        ? JSON.stringify(responsesToChat({ ...body, model }, provider))
+        : JSON.stringify({ ...body, model });
       entry.attempts = i + 1;
       entry.provider = provider.name;
       entry.model_out = model;
+      entry.wire = wire;
 
       const upstream = new URL(provider.base_url);
       const transport = upstream.protocol === 'https:' ? https : http;
@@ -550,7 +939,7 @@ function proxyHandler(req, res) {
       const creq = transport.request({
         protocol: upstream.protocol, hostname: upstream.hostname,
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
-        path: upstream.pathname.replace(/\/+$/, '') + (isCount ? '/v1/messages/count_tokens' : '/v1/messages'),
+        path: upstream.pathname.replace(/\/+$/, '') + upstreamPathOf(wire, ep),
         method: 'POST', headers,
         timeout: UPSTREAM_TIMEOUT_MS,
       }, cres => {
@@ -565,33 +954,80 @@ function proxyHandler(req, res) {
         entry.status = cres.statusCode;
         entry.sticky = wasSticky && !entry.failover;
         // 落到这个渠道就把它记进会话(含失败转移后重新绑定),后续请求继续粘它
-        if (sess.providerId !== provider.id || entry.failover) {
+        if (cres.statusCode < 400 && (sess.providerId !== provider.id || entry.failover)) {
           sess.providerId = provider.id; sess.model = model;
           sess.ruleId = (resolved.rule && resolved.rule.id) || 'default';
         }
-        res.writeHead(cres.statusCode, {
-          'Content-Type': cres.headers['content-type'] || 'application/json',
+        const ct = String(cres.headers['content-type'] || 'application/json');
+        const isSse = ct.includes('text/event-stream');
+        const finishEntry = u => {
+          entry.ms = Date.now() - started;
+          if (u) { entry.in = u.in || 0; entry.out = u.out || 0; entry.cache_read = u.cache_read || 0; }
+          finalize();
+        };
+        const outHeaders = {
+          'Content-Type': ct,
+          'x-mixrouter-app': ep.app,
           'x-mixrouter-provider': safeHeader(provider.name),
           'x-mixrouter-model': safeHeader(model),
           'x-mixrouter-session': safeHeader(sessionKeyOf(ident.key)),
-        });
-        if (entry.stream && cres.headers['content-type'] && cres.headers['content-type'].includes('text/event-stream')) {
+        };
+
+        // responses 客户端 + chat 上游 = 现场翻译(错误体已是 OpenAI 形状,原样透传)
+        if (wire === 'chat' && ep.kind === 'responses') {
+          if (cres.statusCode >= 400) {
+            const parts = [];
+            cres.on('data', c => parts.push(c));
+            cres.on('end', () => {
+              const text = Buffer.concat(parts).toString('utf8');
+              finishEntry(extractUsageOpenAI('chat', text));
+              if (!res.headersSent) { try { res.writeHead(cres.statusCode, outHeaders); res.end(text); } catch {} }
+              else { try { res.end(); } catch {} }
+            });
+            return;
+          }
+          if (isSse) {
+            streamChatAsResponses(cres, res, model, u => {
+              entry.in = u.input_tokens || 0;
+              entry.out = u.output_tokens || 0;
+              entry.cache_read = (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0;
+            }, outHeaders);
+            cres.on('end', () => finishEntry());
+            res.on('close', () => finishEntry());
+          } else {
+            const parts = [];
+            cres.on('data', c => parts.push(c));
+            cres.on('end', () => {
+              const text = Buffer.concat(parts).toString('utf8');
+              let resp = null;
+              try { resp = chatJsonToResponses(JSON.parse(text), model); } catch { /* 上游给了非 JSON,原样透传 */ }
+              finishEntry(extractUsageOpenAI('chat', text));
+              if (!res.headersSent) {
+                try {
+                  // 客户端要的是流、上游却整包回 JSON:摊成 SSE 序列发出去,别让 Codex 干等
+                  if (resp && body.stream !== false) emitResponsesSse(res, resp, outHeaders);
+                  else { res.writeHead(200, outHeaders); res.end(resp ? JSON.stringify(resp) : text); }
+                } catch {}
+              }
+            });
+          }
+          return;
+        }
+        // 同协议直通:Anthropic→Anthropic / responses→responses / chat→chat
+        res.writeHead(cres.statusCode, outHeaders);
+        if (isSse) {
           let acc = '';
           cres.on('data', c => { if (acc.length < 1024 * 1024) acc += c.toString('utf8'); res.write(c); });
-          cres.on('end', () => {
-            entry.ms = Date.now() - started;
-            const u = extractUsage(acc); entry.in = u.in; entry.out = u.out; entry.cache_read = u.cache_read;
-            finalize(); res.end();
-          });
+          cres.on('end', () => { finishEntry(extractUsageFor(wire, acc)); try { res.end(); } catch {} });
         } else {
           const parts = [];
           cres.on('data', c => { parts.push(c); res.write(c); });
           cres.on('end', () => {
-            entry.ms = Date.now() - started;
             const text = Buffer.concat(parts).toString('utf8');
-            const u = extractUsage(text); entry.in = u.in; entry.out = u.out; entry.cache_read = u.cache_read;
-            if (isCount) entry.in = Number((text.match(/"input_tokens"\s*:\s*(\d+)/) || [0, 0])[1]);
-            finalize(); res.end();
+            const u = extractUsageFor(wire, text);
+            // count_tokens 只有输入,别被响应体里别处的数字带偏
+            if (ep.kind === 'count_tokens') u.in = Number((text.match(/"input_tokens"\s*:\s*(\d+)/) || [0, 0])[1]);
+            finishEntry(u); try { res.end(); } catch {}
           });
         }
       });
@@ -612,7 +1048,7 @@ function proxyHandler(req, res) {
   });
 }
 
-// 客户端带来的凭据(可当路由维度用:不同对话配不同 ANTHROPIC_AUTH_TOKEN 即可分流)
+// 客户端带来的凭据(可当路由维度用:不同对话配不同 token 即可分流)
 function clientToken(req) {
   const a = String(req.headers['authorization'] || '');
   if (a) return a.replace(/^Bearer\s+/i, '').trim();
@@ -629,6 +1065,21 @@ function buildUpstreamHeaders(provider, req) {
     'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
   };
   if (req.headers['anthropic-beta']) headers['anthropic-beta'] = req.headers['anthropic-beta'];
+  return headers;
+}
+
+// 转发到 OpenAI 协议上游时的请求头:只带最小集合(不撒 Anthropic 的 x-api-key / anthropic-* 头)
+function buildOpenAiHeaders(provider, req, stream) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': stream ? 'text/event-stream' : 'application/json',
+    'Authorization': 'Bearer ' + provider.api_key,
+    'User-Agent': safeHeader(provider.ua) || safeHeader(req.headers['user-agent']) || DEFAULT_UA_CODEX,
+  };
+  if (req.headers.originator) headers['originator'] = safeHeader(req.headers.originator);
+  // 会话 id 透传:个别网关按它做上游侧缓存粘性;带的是客户端自己的 id,不含本机信息
+  const sid = codexHeaderSessionId(req);
+  if (sid) headers['session-id'] = safeHeader(sid);
   return headers;
 }
 
@@ -664,72 +1115,118 @@ function switchClaude(p) {
 // TOML 基本字符串转义
 const tomlStr = s => '"' + String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 
-function switchCodex(p) {
+// 读 config.toml 的顶层键(第一个 [section] 之前的那些)
+function codexTopLevel(text, key) {
+  let sawSection = false;
+  for (const line of String(text || '').split('\n')) {
+    if (/^\s*\[/.test(line)) sawSection = true;
+    if (sawSection) continue;
+    const m = line.match(new RegExp('^' + key + '\\s*=\\s*"([^"]*)"'));
+    if (m) return m[1];
+  }
+  return '';
+}
+
+// 往 ~/.codex/config.toml 写一个渠道 section(外科手术):
+//   1) 先整体删掉以前写入的 mixr-* section(用户自己的 section 一律不碰)
+//   2) 顶层 model / model_provider 原位替换;没有就插到文件最前
+//   3) 追加新 section(沿用本机已验证的 bearer-token 模式,不依赖 auth.json)
+function writeCodexConfig({ section, name, base_url, api_key, wire_api, model, keepModel }) {
   let text = '';
   try { text = fs.readFileSync(CODEX_CONFIG, 'utf8'); } catch {}
   backupFile(CODEX_CONFIG);
-  const section = 'mixr-' + p.id;
-  const lines = text.split('\n');
-
-  // 1) 删掉我们以前写入的 mixr-* section(整段移除,用户自己的 section 一律不碰)
   const kept = []; let inMixr = false;
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     if (/^\s*\[model_providers\.mixr-/.test(line)) { inMixr = true; continue; }
     if (inMixr && /^\s*\[/.test(line)) inMixr = false;
     if (!inMixr) kept.push(line);
   }
-  // 2) 顶层 model / model_provider 原位替换;没有就插到文件最前
-  let sawSection = false, hasModel = false, hasProvider = false;
-  const mainModel = p.model || (p.models && p.models[0]) || '';
+  let sawSection = false, hasModel = false, hasProvider = false, currentModel = '';
   let out = kept.map(line => {
     if (/^\s*\[/.test(line)) sawSection = true;
-    if (!sawSection && /^model\s*=/.test(line)) { hasModel = true; return `model = ${tomlStr(mainModel)}`; }
+    if (!sawSection && /^model\s*=/.test(line)) {
+      hasModel = true;
+      currentModel = (line.match(/=\s*"([^"]*)"/) || [])[1] || '';
+      // 路由模式不改动顶层模型名——路由规则就是按它匹配的
+      return `model = ${tomlStr(keepModel && currentModel ? currentModel : model)}`;
+    }
     if (!sawSection && /^model_provider\s*=/.test(line)) { hasProvider = true; return `model_provider = ${tomlStr(section)}`; }
     return line;
   });
   const head = [];
-  if (!hasModel) head.push(`model = ${tomlStr(mainModel)}`);
+  if (!hasModel) head.push(`model = ${tomlStr(model)}`);
   if (!hasProvider) head.push(`model_provider = ${tomlStr(section)}`);
   if (head.length) out = head.concat(out);
-  // 3) 追加新 section(沿用本机已验证的 bearer-token 模式,不依赖 auth.json)
   out.push('', `[model_providers.${section}]`,
-    `name = ${tomlStr(p.name)}`,
-    `base_url = ${tomlStr(p.base_url)}`,
-    `wire_api = ${tomlStr(p.wire_api || 'responses')}`,
+    `name = ${tomlStr(name)}`,
+    `base_url = ${tomlStr(base_url)}`,
+    `wire_api = ${tomlStr(wire_api || 'responses')}`,
     'requires_openai_auth = false',
-    `experimental_bearer_token = ${tomlStr(p.api_key)}`);
+    `experimental_bearer_token = ${tomlStr(api_key)}`);
   fs.mkdirSync(path.dirname(CODEX_CONFIG), { recursive: true });
   fs.writeFileSync(CODEX_CONFIG, out.join('\n').replace(/\n{3,}$/, '\n\n'));
   try { fs.chmodSync(CODEX_CONFIG, 0o600); } catch {}
 }
 
+function switchCodex(p) {
+  writeCodexConfig({ section: 'mixr-' + p.id, name: p.name, base_url: p.base_url,
+    api_key: p.api_key, wire_api: p.wire_api || 'responses',
+    model: p.model || (p.models && p.models[0]) || '' });
+}
+
+// 路由模式:把客户端指向本机代理,流量开始按路由规则分发
+//   Claude Code → settings.json 的 env(模型名/槽位保持不动,路由就靠它匹配)
+//   Codex      → config.toml 顶层 model_provider 换成 mixr-router,顶层 model 保持不动
+function switchClaudeRouter() {
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')); } catch {}
+  backupFile(CLAUDE_SETTINGS);
+  cfg.env = cfg.env || {};
+  cfg.env.ANTHROPIC_BASE_URL = ROUTER_URL;
+  cfg.env.ANTHROPIC_AUTH_TOKEN = ROUTER_TOKEN;
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(cfg, null, 2) + '\n');
+  try { fs.chmodSync(CLAUDE_SETTINGS, 0o600); } catch {}
+}
+function switchCodexRouter() {
+  let text = ''; try { text = fs.readFileSync(CODEX_CONFIG, 'utf8'); } catch {}
+  const cur = codexTopLevel(text, 'model');
+  const fallback = (store.codex.find(p => p.enabled !== false && p.model) || {}).model || '';
+  writeCodexConfig({ section: ROUTER_SECTION, name: `mixrouter(经 :${PROXY_PORT} 路由)`,
+    base_url: ROUTER_URL + '/v1', api_key: ROUTER_TOKEN, wire_api: 'responses',
+    model: cur || fallback, keepModel: true });
+}
+const switchRouter = app => (app === 'codex' ? switchCodexRouter() : switchClaudeRouter());
+
 // 读取客户端当前实际生效的上游(与渠道库比对,给 UI 显示"配置漂移"用)
+const trimSlash = s => String(s || '').replace(/\/+$/, '');
 function liveState() {
   const live = {};
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')); } catch {}
   const env = cfg.env || {};
   const claudeBase = env.ANTHROPIC_BASE_URL || '';
-  const curClaude = current.claude ? findProvider(current.claude) : null;
-  live.claude = { base_url: claudeBase, model: env.ANTHROPIC_MODEL || '',
-    match: !!(curClaude && curClaude.base_url === claudeBase && curClaude.api_key === (env.ANTHROPIC_AUTH_TOKEN || '')) };
+  const curClaude = current.claude && current.claude !== ROUTER_ID ? findProvider(current.claude) : null;
+  const claudeRouter = trimSlash(claudeBase) === ROUTER_URL;
+  live.claude = { base_url: claudeBase, model: env.ANTHROPIC_MODEL || '', router: claudeRouter,
+    match: claudeRouter
+      // 路由模式:current 记的是 "@router" 哨兵,或库里有渠道自己就指向代理
+      ? (current.claude === ROUTER_ID
+        || !!(curClaude && trimSlash(curClaude.base_url) === ROUTER_URL && curClaude.api_key === (env.ANTHROPIC_AUTH_TOKEN || '')))
+      : !!(curClaude && curClaude.base_url === claudeBase && curClaude.api_key === (env.ANTHROPIC_AUTH_TOKEN || '')) };
 
   let text = ''; try { text = fs.readFileSync(CODEX_CONFIG, 'utf8'); } catch {}
-  const lines = text.split('\n');
-  let provider = '', model = '', sawSection = false;
-  for (const line of lines) {
-    if (/^\s*\[/.test(line)) { sawSection = true; continue; }
-    if (!sawSection) {
-      let m = line.match(/^model_provider\s*=\s*"([^"]*)"/); if (m) provider = m[1];
-      m = line.match(/^model\s*=\s*"([^"]*)"/); if (m) model = m[1];
-    }
-  }
+  const provider = codexTopLevel(text, 'model_provider');
+  const model = codexTopLevel(text, 'model');
   let base = '', wire = '';
   const sec = text.match(new RegExp(`\\[model_providers\\.${provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\][^\\[]*`));
   if (sec) { const b = sec[0].match(/base_url\s*=\s*"([^"]*)"/); base = b ? b[1] : ''; const w = sec[0].match(/wire_api\s*=\s*"([^"]*)"/); wire = w ? w[1] : ''; }
-  const curCodex = current.codex ? findProvider(current.codex) : null;
-  live.codex = { provider, model, base_url: base, wire_api: wire,
-    match: !!(curCodex && provider === 'mixr-' + curCodex.id && curCodex.api_key && sec && sec[0].includes(tomlStr(curCodex.api_key))) };
+  const curCodex = current.codex && current.codex !== ROUTER_ID ? findProvider(current.codex) : null;
+  const codexRouter = provider === ROUTER_SECTION || trimSlash(base) === ROUTER_URL + '/v1' || trimSlash(base) === ROUTER_URL;
+  live.codex = { provider, model, base_url: base, wire_api: wire, router: codexRouter,
+    match: codexRouter
+      ? (current.codex === ROUTER_ID
+        || !!(curCodex && trimSlash(curCodex.base_url) === ROUTER_URL + '/v1' && curCodex.api_key && sec && sec[0].includes(tomlStr(curCodex.api_key))))
+      : !!(curCodex && provider === 'mixr-' + curCodex.id && curCodex.api_key && sec && sec[0].includes(tomlStr(curCodex.api_key))) };
   return live;
 }
 
@@ -809,17 +1306,22 @@ function apiHandler(req, res) {
         sessions: sessionList(),
         cooldowns: Object.entries(cooldowns).map(([id, until]) => ({ provider: id, until, name: (findProvider(id) || {}).name || id })),
         session_ttl_min: Math.round(SESSION_TTL_MS / 60000), cooldown_s: Math.round(COOLDOWN_MS / 1000),
+        router: { id: ROUTER_ID, url: ROUTER_URL, token: ROUTER_TOKEN,
+          claude_base: ROUTER_URL, codex_base: ROUTER_URL + '/v1',
+          endpoints: ENDPOINTS.map(e => `${e.app === 'claude' ? 'Anthropic' : 'OpenAI'} ${e.path}`) },
       });
     }
-    // ---- 日志(支持过滤:provider 模型子串 / model 子串 / status=ok|err|具体码 / limit)
+    // ---- 日志(支持过滤:app / provider 模型子串 / model 子串 / status=ok|err|具体码 / limit)
     if (req.method === 'GET' && p === '/api/logs') {
       const q = url.searchParams;
       const limit = Math.min(Number(q.get('limit') || 200), RING_SIZE);
+      const app = q.get('app') || '';
       const prov = (q.get('provider') || '').toLowerCase();
       const model = (q.get('model') || '').toLowerCase();
       const sess = (q.get('session') || '').toLowerCase();
       const status = q.get('status') || '';
       let items = ring;
+      if (app) items = items.filter(e => (e.app || 'claude') === app);
       if (prov) items = items.filter(e => (e.provider || '').toLowerCase().includes(prov));
       if (model) items = items.filter(e => (e.model_in || '').toLowerCase().includes(model) || (e.model_out || '').toLowerCase().includes(model));
       if (sess) items = items.filter(e => (e.session || '').toLowerCase().includes(sess));
@@ -828,20 +1330,22 @@ function apiHandler(req, res) {
       else if (status) items = items.filter(e => String(e.status) === status);
       return send(200, { logs: items.slice(-limit).reverse() });
     }
-    // ---- 统计:ring 内存窗口内的全量聚合(总数/成功率/token/按渠道/按模型)
+    // ---- 统计:ring 内存窗口内的全量聚合(总数/成功率/token/按组/按渠道/按模型)
     if (req.method === 'GET' && p === '/api/stats') {
       let reqs = 0, ok = 0, inTok = 0, outTok = 0, cache = 0;
-      const byProvider = {}, byModel = {};
+      const byProvider = {}, byModel = {}, byApp = {};
       for (const e of ring) {
         reqs++;
         if (e.status >= 200 && e.status < 400 && !e.err) ok++;
         inTok += e.in || 0; outTok += e.out || 0; cache += e.cache_read || 0;
+        const ay = e.app || 'claude';
+        byApp[ay] = (byApp[ay] || 0) + 1;
         const pv = e.provider || '(未知)';
         byProvider[pv] = (byProvider[pv] || 0) + 1;
         const mk = e.model_out || e.model_in || '(?)';
         byModel[mk] = (byModel[mk] || 0) + 1;
       }
-      return send(200, { reqs, ok, ok_rate: reqs ? Math.round(ok * 100 / reqs) : 100, inTok, outTok, cache, by_provider: byProvider, by_model: byModel });
+      return send(200, { reqs, ok, ok_rate: reqs ? Math.round(ok * 100 / reqs) : 100, inTok, outTok, cache, by_app: byApp, by_provider: byProvider, by_model: byModel });
     }
     // ---- 渠道 CRUD(app = claude | codex)
     if (req.method === 'POST' && p === '/api/providers') {
@@ -861,6 +1365,8 @@ function apiHandler(req, res) {
       } else {
         prov.model = String(b.model || '');
         prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
+        // 纯文本网关(GLM 一类):把 responses 里的图片换成一句说明,而不是让上游 400
+        prov.drop_images = !!b.drop_images;
       }
       store[app].push(prov);
       saveStore();
@@ -887,6 +1393,7 @@ function apiHandler(req, res) {
         } else {
           if (b.model !== undefined) prov.model = String(b.model);
           if (b.wire_api !== undefined) prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
+          if (b.drop_images !== undefined) prov.drop_images = !!b.drop_images;
         }
         saveStore();
         return send(200, { ok: true });
@@ -923,6 +1430,18 @@ function apiHandler(req, res) {
       return send(200, { ok: true, app, live: liveState()[app] });
     }
 
+    // ---- 路由模式:把客户端整体指向本机代理(此后流量按路由规则分发)
+    m = p.match(/^\/api\/router\/([^/]+)$/);
+    if (req.method === 'POST' && m) {
+      const app = m[1] === 'codex' ? 'codex' : 'claude';
+      if (app === 'codex' && !store.codex.length) return send(400, { error: '还没有 Codex 组渠道,先添加渠道再切路由模式' });
+      if (app === 'claude' && !store.claude.length) return send(400, { error: '还没有 Claude 组渠道,先添加渠道再切路由模式' });
+      try { switchRouter(app); } catch (e) { return send(500, { error: '写入配置失败: ' + e.message }); }
+      current[app] = ROUTER_ID;
+      saveStore();
+      return send(200, { ok: true, app, live: liveState()[app] });
+    }
+
     // ---- 会话:列表 / 手动改绑(把某个对话钉到指定渠道)/ 解绑
     if (req.method === 'GET' && p === '/api/sessions') {
       return send(200, { sessions: sessionList() });
@@ -939,8 +1458,9 @@ function apiHandler(req, res) {
       const b = JSON.parse((await readBody()) || '{}');
       const id = String(b.provider || '');
       if (id) {
-        const prov = store.claude.find(x => x.id === id);
-        if (!prov) return send(404, { error: '渠道不存在(会话只能绑 Claude 组的渠道)' });
+        const group = storeOf(s.app || 'claude');
+        const prov = group.find(x => x.id === id);
+        if (!prov) return send(404, { error: `渠道不存在(该对话属于 ${s.app === 'codex' ? 'Codex' : 'Claude'} 组,只能绑本组渠道)` });
         if (prov.enabled === false) return send(400, { error: `渠道 "${prov.name}" 已停用,不能绑定` });
         s.providerId = id;
         s.pinned = true;
@@ -996,7 +1516,7 @@ function listen(port, handler, label) {
 if (require.main === module) {
   process.title = 'mixrouter';
   Promise.all([listen(PROXY_PORT, proxyHandler, 'proxy'), listen(UI_PORT, apiHandler, 'ui')]).then(() => {
-    console.log(`[mixrouter v${VERSION}] 代理 :${PROXY_PORT}  控制台 http://${HOST}:${UI_PORT}  渠道 claude ${store.claude.length} / codex ${store.codex.length}`);
+    console.log(`[mixrouter v${VERSION}] 代理 :${PROXY_PORT}(Claude /v1/messages · Codex /v1/responses)  控制台 http://${HOST}:${UI_PORT}  渠道 claude ${store.claude.length} / codex ${store.codex.length}`);
   }).catch(e => {
     console.error(`启动失败: ${e.message}(端口 ${PROXY_PORT}/${UI_PORT} 是否被占用?)`);
     process.exit(1);
@@ -1010,10 +1530,16 @@ if (require.main === module) {
 module.exports = {
   VERSION, proxyHandler, apiHandler, listen,
   resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl,
-  switchClaude, switchCodex, liveState, testProvider,
+  switchClaude, switchCodex, switchClaudeRouter, switchCodexRouter, switchRouter,
+  liveState, testProvider, codexTopLevel, writeCodexConfig,
   // v3 会话分发
-  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, poolMembers,
+  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, poolMembers, ruleBelongsToApp,
   sessionList, buildUpstreamHeaders, clientToken, strategyOf, applyLabel,
+  // v3.1 OpenAI 端点(Codex 组)
+  ENDPOINTS, classifyProxyRequest, wireOf, upstreamPathOf, modelList, buildOpenAiHeaders,
+  codexHeaderSessionId, codexBodySessionId, codexFirstUserText, codexUserTexts, extractUsageOpenAI, extractUsageFor,
+  responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
+  ROUTER_ID, ROUTER_URL, ROUTER_TOKEN, ROUTER_SECTION,
   _state: {
     get store() { return store; }, set store(v) { store = v; },
     get routes() { return routes; }, set routes(v) { routes = v; },

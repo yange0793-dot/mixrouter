@@ -1,14 +1,24 @@
 {
   "version": 2,
-  "current": { "claude": "p1", "codex": null },
+  "current": {
+    "claude": "p1",
+    "codex": null
+  },
   "claude": [
     {
       "id": "p1",
       "name": "示例渠道",
       "base_url": "https://api.example.com",
       "api_key": "sk-xxxx",
-      "models": ["claude-opus-5", "claude-opus-5[1M]"],
-      "slots": { "opus": "", "sonnet": "", "haiku": "" },
+      "models": [
+        "claude-opus-5",
+        "claude-opus-5[1M]"
+      ],
+      "slots": {
+        "opus": "",
+        "sonnet": "",
+        "haiku": ""
+      },
       "enabled": true,
       "ua": "",
       "note": "claude 组渠道可作为路由目标;模型带 [1M] 后缀 = 自动剥离并加 context-1m beta 头",
@@ -24,7 +34,20 @@
       "model": "gpt-5-codex",
       "wire_api": "responses",
       "enabled": true,
-      "note": "切换后写入 ~/.codex/config.toml(experimental_bearer_token 模式)",
+      "note": "Codex 组渠道现在也能作为路由目标(:8787/v1/responses);wire_api=chat 的网关由代理自动翻译 responses⇄chat;纯文本网关可开 drop_images",
+      "created_at": "1970-01-01T00:00:00.000Z",
+      "drop_images": false
+    },
+    {
+      "id": "c2",
+      "name": "Codex chat 系示例渠道",
+      "base_url": "https://api.example.com/v1",
+      "api_key": "sk-xxxx",
+      "model": "glm-5.3-flash",
+      "wire_api": "chat",
+      "drop_images": true,
+      "enabled": false,
+      "note": "只开 /v1/chat/completions 的网关(如 GLM 系):codex 只说 responses,代理负责协议翻译",
       "created_at": "1970-01-01T00:00:00.000Z"
     }
   ]

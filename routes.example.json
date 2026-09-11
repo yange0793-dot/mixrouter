@@ -1,5 +1,5 @@
 {
-  "_说明": "路由规则模板。池成员写成字符串即用规则的目标模型,写成对象可各自指定模型与权重。",
+  "_说明": "路由规则模板。池成员写成字符串即用规则的目标模型,写成对象可各自指定模型与权重。app 指定规则只对哪一组生效(Claude Code 说 Anthropic / Codex 说 OpenAI),留空 = 两组通用。",
   "rules": [
     {
       "_注释": "渠道池 + 会话粘性:同一个 Agent 的每个对话各锁一个渠道,对话内不切换",
@@ -8,13 +8,20 @@
       "provider": "",
       "model": "",
       "pool": [
-        { "provider": "p1", "weight": 2 },
-        { "provider": "p2", "model": "claude-opus-5[1M]" }
+        {
+          "provider": "p1",
+          "weight": 2
+        },
+        {
+          "provider": "p2",
+          "model": "claude-opus-5[1M]"
+        }
       ],
       "strategy": "weighted",
       "priority": 10,
       "when": {},
-      "enabled": true
+      "enabled": true,
+      "app": "claude"
     },
     {
       "_注释": "单一渠道 + 附加条件(这里要求客户端 UA 含 claude-cli)",
@@ -25,8 +32,11 @@
       "pool": [],
       "strategy": "round_robin",
       "priority": 0,
-      "when": { "ua": "claude-cli" },
-      "enabled": true
+      "when": {
+        "ua": "claude-cli"
+      },
+      "enabled": true,
+      "app": "claude"
     },
     {
       "_注释": "按对话分流:会话 id 含 vip 的走另一个渠道",
@@ -37,9 +47,54 @@
       "pool": [],
       "strategy": "round_robin",
       "priority": 0,
-      "when": { "session": "vip" },
+      "when": {
+        "session": "vip"
+      },
+      "enabled": false,
+      "app": "claude"
+    },
+    {
+      "_注释": "Codex 组:按模型名分流,gpt 系走池、chat 系网关(=wire_api chat)单独走翻译通路",
+      "id": "r4",
+      "match": "gpt-5",
+      "provider": "",
+      "model": "",
+      "pool": [
+        {
+          "provider": "c1"
+        }
+      ],
+      "strategy": "round_robin",
+      "priority": 0,
+      "app": "codex",
+      "when": {},
+      "enabled": false
+    },
+    {
+      "_注释": "Codex 组:chat 协议网关(Codex 请求被翻译成 chat/completions 再转发)",
+      "id": "r5",
+      "match": "glm",
+      "provider": "",
+      "model": "",
+      "pool": [
+        {
+          "provider": "c2"
+        }
+      ],
+      "strategy": "round_robin",
+      "priority": 0,
+      "app": "codex",
+      "when": {},
       "enabled": false
     }
   ],
-  "default": { "provider": "", "model": "", "pool": [], "strategy": "round_robin" }
+  "default": {
+    "provider": "",
+    "model": "",
+    "pool": [],
+    "strategy": "round_robin",
+    "app": "",
+    "when": {},
+    "enabled": true
+  }
 }

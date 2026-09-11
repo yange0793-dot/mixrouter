@@ -177,8 +177,11 @@
     <!-- 渠道 -->
     <section id="view-providers">
       <div class="head">
-        <div><h1>渠道</h1><div class="sub" id="prov-sub">自由添加上游渠道,点「切换」写入客户端真实配置(自动备份原文件)</div></div>
-        <button class="primary" onclick="openProvider()">＋ 新建渠道</button>
+        <div><h1>渠道</h1><div class="sub" id="prov-sub">自由添加上游渠道;点「切换」直连某个渠道,或点「路由模式」让客户端经 :8787 按规则分发(写入前自动备份)</div></div>
+        <div style="display:flex;gap:8px">
+          <button id="btn-router" onclick="switchRouterMode()">⇄ 路由模式</button>
+          <button class="primary" onclick="openProvider()">＋ 新建渠道</button>
+        </div>
       </div>
       <div class="apptabs">
         <button id="tab-claude" class="active" onclick="setApp('claude')"><span class="appdot" style="background:#d97757"></span>Claude Code</button>
@@ -214,16 +217,23 @@
     <!-- 会话 -->
     <section id="view-sessions" style="display:none">
       <div class="head">
-        <div><h1>会话</h1><div class="sub">每个对话(Claude Code 会话)锁定一个渠道;这里的改动立即对该对话生效,不影响其他对话</div></div>
-        <button class="danger" onclick="clearSessions()">清空全部绑定</button>
+        <div><h1>会话</h1><div class="sub">每个对话锁定一个渠道;这里的改动立即对该对话生效,不影响其他对话(Claude Code 与 Codex 的对话都会出现在这里)</div></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="f-sess-app" onchange="sessApp=this.value;renderSessions()" style="width:auto">
+            <option value="">全部对话</option>
+            <option value="claude">仅 Claude Code</option>
+            <option value="codex">仅 Codex</option>
+          </select>
+          <button class="danger" onclick="clearSessions()">清空全部绑定</button>
+        </div>
       </div>
       <div class="chips" id="sess-chips"></div>
       <table>
-        <thead><tr><th>会话</th><th>对话</th><th>渠道(可改)</th><th>模型</th><th>命中规则</th><th>请求</th><th>tokens 入/出</th><th>最近活跃</th><th></th></tr></thead>
+        <thead><tr><th>会话</th><th>组</th><th>对话</th><th>渠道(可改)</th><th>模型</th><th>命中规则</th><th>请求</th><th>tokens 入/出</th><th>最近活跃</th><th></th></tr></thead>
         <tbody id="sess-body"></tbody>
       </table>
       <div class="empty" id="sess-empty" style="display:none">
-        <b>还没有活跃对话</b>经 127.0.0.1:8787 的 Claude Code 会话会自动出现在这里,并按路由策略分到不同渠道
+        <b>还没有活跃对话</b>经 127.0.0.1:8787 的 Claude Code / Codex 会话会自动出现在这里,并按路由策略分到不同渠道
       </div>
     </section>
 
@@ -237,6 +247,13 @@
       </div>
       <div class="chips" id="stat-chips"></div>
       <div class="logbar">
+        <label>分组
+          <select id="f-app">
+            <option value="">全部</option>
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+          </select>
+        </label>
         <label>渠道 <input type="text" id="f-provider" placeholder="渠道名子串"></label>
         <label>模型 <input type="text" id="f-model" placeholder="模型名子串"></label>
         <label>会话 <input type="text" id="f-session" placeholder="会话短 id"></label>
@@ -280,6 +297,7 @@
         <label>模型 *</label><input type="text" id="m-model" placeholder="如 gpt-5.6-sol">
         <label>协议(wire_api)</label>
         <select id="m-wire"><option value="responses">responses(推荐,新网关)</option><option value="chat">chat(completions 兼容)</option></select>
+        <div class="chk"><input type="checkbox" id="m-dropimg"><span>纯文本渠道(丢弃图片;勾上后 responses 里的图会换成一句说明再转发)</span></div>
       </div>
       <label>备注</label><input type="text" id="m-note" placeholder="">
       <div class="chk"><input type="checkbox" id="m-enabled" checked><span>启用</span></div>
@@ -345,27 +363,25 @@ function setApp(app) {
 // ---------------- 渠道 ----------------
 function liveLine() {
   if (!state) return '';
-  const lv = state.live[curApp], cur = state.current[curApp];
-  const curName = cur ? (state.providers[curApp].find(p => p.id === cur) || {}).name : null;
+  const lv = state.live[curApp], cur = state.current[curApp], RouterId = (state.router || {}).id || '@router';
+  const curName = cur && cur !== RouterId ? (state.providers[curApp].find(p => p.id === cur) || {}).name : null;
   let s = `${APPS[curApp].label} 当前生效: `;
-  if (curApp === 'claude') {
-    s += lv.base_url ? `<b>${esc(lv.base_url)}</b> · ${esc(lv.model || '(未设模型)')}` : '(未配置)';
-    s += ` · 库内选中: <b>${esc(curName || '(无)')}</b>`;
-    if (curName && !lv.match) s += ` <span class="warn">⚠ 客户端配置与所选渠道不一致,点渠道上的「切换」恢复</span>`;
-  } else {
-    s += lv.provider ? `<b>${esc(lv.provider)}</b> · ${esc(lv.model || '?')} · ${esc(lv.base_url || '?')} (${esc(lv.wire_api || '?')})` : '(未配置)';
-    s += ` · 库内选中: <b>${esc(curName || '(无)')}</b>`;
-    if (curName && !lv.match) s += ` <span class="warn">⚠ 客户端配置与所选渠道不一致,点渠道上的「切换」恢复</span>`;
-  }
+  if (lv.router) s += `<b>${esc(lv.base_url)}</b> <span style="color:var(--ok)">⇄ 路由模式</span> · ${esc(lv.model || '(未设模型)')} · 库内选中: <b>${cur === RouterId ? '路由模式' : (curName || '(无)')}</b>`;
+  else s += lv.base_url ? `<b>${esc(lv.base_url)}</b> · ${esc(lv.model || '(未设模型)')} · 库内选中: <b>${esc(curName || '(无)')}</b>` : '(未配置)';
+  if (curApp === 'codex' && !lv.router && lv.provider) s += ` · ${esc(lv.wire_api || '?')}`;
+  if ((curName || cur === RouterId) && !lv.match) s += ` <span class="warn">⚠ 客户端配置与所选渠道不一致,点渠道上的「切换」恢复</span>`;
   return s;
 }
 function renderProviders() {
   if (!state) return;
   const ps = state.providers[curApp];
+  const RouterId = (state.router || {}).id || '@router';
+  const inRouter = state.current[curApp] === RouterId || !!(state.live[curApp] || {}).router;
+  $('btn-router').textContent = inRouter ? '⇄ 路由模式(已启用)' : '⇄ 路由模式';
   $('empty-title').textContent = `${APPS[curApp].label} 还没有渠道`;
   $('empty-hint').textContent = curApp === 'claude'
-    ? '点击右上角「新建渠道」添加;想让流量走路由器,就建一个 Base URL 为 http://127.0.0.1:8787 的渠道再切换'
-    : '点击右上角「新建渠道」添加;Codex 渠道直接写入 ~/.codex/config.toml(不经过路由器)';
+    ? '点击右上角「新建渠道」添加;点「路由模式」让 Claude Code 经 :8787,按模型名分发到不同渠道'
+    : '点击右上角「新建渠道」添加;点「路由模式」让 Codex 经 :8787 统一路由(chat 协议网关由代理自动翻译)';
   $('prov-empty').style.display = ps.length ? 'none' : '';
   $('liveinfo').innerHTML = liveLine();
   // 配置漂移横幅(cc-switch 式琥珀警告)
@@ -384,7 +400,7 @@ function renderProviders() {
       : `<div class="testline err">✗ 测试失败 · ${esc(t.error || ('HTTP ' + t.status))}${t.body ? ' · ' + esc(t.body.slice(0,120)) : ''}</div>`;
     const modelTags = curApp === 'claude'
       ? (p.models.length ? `<div class="tags">${p.models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}</div>` : '')
-      : `<div class="tags"><span class="tag">${esc(p.model)}</span><span class="tag">${esc(p.wire_api)}</span></div>`;
+      : `<div class="tags"><span class="tag">${esc(p.model)}</span><span class="tag">${esc(p.wire_api)}</span>${p.drop_images ? '<span class="tag">纯文本</span>' : ''}</div>`;
     const slotTags = curApp === 'claude' && (p.slots && (p.slots.opus || p.slots.sonnet || p.slots.haiku))
       ? `<div class="mono">槽位: ${esc(p.slots.opus || '-')} / ${esc(p.slots.sonnet || '-')} / ${esc(p.slots.haiku || '-')}</div>` : '';
     return `<div class="card ${p.enabled ? '' : 'off'} ${isCur && !drift ? 'cur' : ''}">
@@ -420,6 +436,7 @@ function openProvider(id) {
   if (isCodex) {
     $('m-model').value = editing ? editing.model : '';
     $('m-wire').value = editing ? editing.wire_api : 'responses';
+    $('m-dropimg').checked = !!(editing && editing.drop_images);
   } else {
     $('m-models').value = editing ? editing.models.join(', ') : '';
     $('m-slot-opus').value = editing && editing.slots ? editing.slots.opus : '';
@@ -434,7 +451,7 @@ function closeModal() { $('mask').classList.remove('show'); }
 async function saveProvider() {
   const body = { app: curApp, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(),
     api_key: $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
-  if (curApp === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; }
+  if (curApp === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; body.drop_images = $('m-dropimg').checked; }
   else body.models = $('m-models').value,
        body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), haiku: $('m-slot-haiku').value.trim() };
   if (!body.name || !body.base_url) return toast('名称与 Base URL 必填', 'err');
@@ -452,6 +469,17 @@ async function switchProvider(id) {
   try {
     const r = await api('/api/switch/' + id, { method: 'POST' });
     toast(`已切换:${APPS[curApp].label} → ${p.name}`, 'ok');
+    refresh();
+  } catch (e) { toast('切换失败:' + e.message, 'err'); }
+}
+async function switchRouterMode() {
+  const app = curApp, R = state.router || {};
+  const target = app === 'claude' ? APPS.claude.cfg : APPS.codex.cfg;
+  const base = app === 'claude' ? (R.claude_base || 'http://127.0.0.1:8787') : (R.codex_base || 'http://127.0.0.1:8787/v1');
+  if (!confirm(`把 ${APPS[app].label} 切到「路由模式」?\n\n上游将改写为 ${base},此后请求按「路由」页的规则分发到不同渠道——同一个 Agent 的多个对话各走各的 key。\n写入 ${target}(原文件自动备份);${app === 'claude' ? 'Claude Code 需重启会话生效' : 'Codex 需重启生效'}。\n(渠道列表里的「切换」仍可随时改回直连某一家)`)) return;
+  try {
+    await api('/api/router/' + app, { method: 'POST' });
+    toast(`已切到路由模式:${APPS[app].label} → ${base}`, 'ok');
     refresh();
   } catch (e) { toast('切换失败:' + e.message, 'err'); }
 }
@@ -479,7 +507,7 @@ async function testProvider(id) {
 // ---------------- 路由 ----------------
 const STRAT_LABEL = { round_robin: '轮询(新对话依次分配)', weighted: '加权(按权重比例)', least_used: '最少会话优先', random: '随机' };
 function blankRule() {
-  return { id: 'r' + Date.now(), match: '', provider: '', model: '', pool: [], strategy: 'round_robin', priority: 0, when: {}, enabled: true };
+  return { id: 'r' + Date.now(), match: '', provider: '', model: '', pool: [], strategy: 'round_robin', priority: 0, app: '', when: {}, enabled: true };
 }
 function renderRoutes() {
   if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
@@ -487,12 +515,27 @@ function renderRoutes() {
   $('def-box').innerHTML = ruleTargetBox(routesDraft.default, 'def', '兜底');
 }
 // 一个规则的完整编辑卡:匹配 + 优先级 + 启用 | 目标(单渠道/池) | 匹配条件
+// 规则属于哪一组:显式声明优先;没声明就按池里渠道的归属推断(默认 Claude)
+function appOfRule(r) {
+  if (r.app === 'codex' || r.app === 'claude') return r.app;
+  const ids = [(r.pool || []).map(m => typeof m === 'string' ? m : m.provider), r.provider ? [r.provider] : []].flat().filter(Boolean);
+  if (ids.some(id => state.providers.codex.some(p => p.id === id))) return 'codex';
+  return 'claude';
+}
 function ruleCard(r, i) {
   const isPool = (r.pool || []).length > 0;
+  const app = appOfRule(r);
   return `<div class="rulecard">
     <div class="rc-head">
       <span class="rc-idx">${i + 1}</span>
-      <input type="text" value="${esc(r.match)}" oninput="routesDraft.rules[${i}].match=this.value" placeholder="匹配请求模型名包含…,如 opus, claude-3-opus, sonnet">
+      <input type="text" value="${esc(r.match)}" oninput="routesDraft.rules[${i}].match=this.value" placeholder="匹配请求模型名包含…,如 opus, claude-3-opus, gpt-5">
+      <label class="rc-mini">适用
+        <select onchange="setRuleApp(${i},this.value)">
+          <option value="" ${r.app ? '' : 'selected'}>两组通用</option>
+          <option value="claude" ${r.app === 'claude' ? 'selected' : ''}>Claude Code</option>
+          <option value="codex" ${r.app === 'codex' ? 'selected' : ''}>Codex</option>
+        </select>
+      </label>
       <label class="rc-mini">优先级 <input type="number" value="${Number(r.priority) || 0}" oninput="routesDraft.rules[${i}].priority=Number(this.value)||0"></label>
       <label class="rc-mini"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="routesDraft.rules[${i}].enabled=this.checked"> 启用</label>
       <button class="iconbtn" onclick="delRule(${i})" title="删除规则">✕</button>
@@ -505,27 +548,28 @@ function ruleCard(r, i) {
         <input type="text" value="${esc((r.when || {}).ua || '')}" oninput="setWhen(${i},'ua',this.value)" placeholder="客户端 UA 含…(可选)">
         <input type="text" value="${esc((r.when || {}).token || '')}" oninput="setWhen(${i},'token',this.value)" placeholder="客户端 token 含…(可选)">
       </div>
-      ${isPool ? '<div class="pool-hint">条件留空即不限制;三个条件都填则需同时满足</div>' : ''}
+      <div class="pool-hint">目标只能选${app === 'codex' ? ' Codex' : ' Claude'} 组渠道(当前适用:${app === 'codex' ? 'Codex/OpenAI' : 'Claude/Anthropic'} 协议);规则里绑了另一组渠道时,那组请求会跳过它继续往下匹配</div>
     </div></div>`;
 }
 // 目标编辑区:模式(单渠道 / 渠道池)+ 策略 + 成员勾选 + 目标模型
 function ruleTargetBox(r, key, label) {
   const isPool = (r.pool || []).length > 0;
+  const app = appOfRule(r);
   const field = key === 'def' ? 'routesDraft.default' : `routesDraft.rules[${key}]`;
   const ids = new Set((r.pool || []).map(m => typeof m === 'string' ? m : m.provider));
   const wOf = id => { const m = (r.pool || []).find(x => typeof x === 'object' && x && x.provider === id); return m && m.weight ? m.weight : ''; };
-  const members = state.providers.claude.map(p => `
+  const members = state.providers[app].map(p => `
     <label class="poolitem ${ids.has(p.id) ? 'on' : ''}">
       <input type="checkbox" ${ids.has(p.id) ? 'checked' : ''} onchange="togglePool('${key}','${p.id}',this.checked)">
       <span>${esc(p.name)}</span>${p.enabled ? '' : '<span class="badge off">停用</span>'}
       <input class="w" type="number" min="1" value="${wOf(p.id)}" placeholder="权重"
         title="加权策略下的权重" oninput="setWeight('${key}','${p.id}',this.value)">
     </label>`).join('');
-  const single = `<select onchange="${field}.provider=this.value">${ruleOpts(r.provider)}</select>`;
+  const single = `<select onchange="${field}.provider=this.value">${ruleOpts(r.provider, app)}</select>`;
   const pool = `<select onchange="${field}.strategy=this.value">
       ${Object.keys(STRAT_LABEL).map(s => `<option value="${s}" ${r.strategy === s ? 'selected' : ''}>${STRAT_LABEL[s]}</option>`).join('')}
     </select>
-    <div class="poolbox">${members || '<span class="pool-hint">还没有 Claude 组渠道,先去「渠道」页添加</span>'}</div>`;
+    <div class="poolbox">${members || `<span class="pool-hint">还没有 ${APPS[app].label} 组渠道,先去「渠道」页添加(或把「适用」改成有渠道的那组)</span>`}</div>`;
   return `<div class="rc-line">
       <span class="rc-tag">${label}</span>
       <select onchange="setPoolMode('${key}',this.value)">
@@ -533,18 +577,28 @@ function ruleTargetBox(r, key, label) {
         <option value="pool" ${isPool ? 'selected' : ''}>渠道池(多对话分流)</option>
       </select>
       ${isPool ? pool : single}
-      <input type="text" value="${esc(r.model || '')}" oninput="${field}.model=this.value" placeholder="目标模型,留空透传">
+      <input type="text" value="${esc(r.model || '')}" oninput="${field}.model=this.value" placeholder="${app === 'codex' ? '目标模型(留空用渠道自带模型名)' : '目标模型,留空透传'}">
     </div>`;
 }
-// 路由目标只允许 Claude 渠道(代理只说 Anthropic 协议)
-function ruleOpts(sel) {
-  return '<option value="">(未绑定)</option>' + state.providers.claude.map(p =>
+// 路由目标只允许本组渠道(Claude 端点说 Anthropic,Codex 端点说 OpenAI)
+function ruleOpts(sel, app = 'claude') {
+  return '<option value="">(未绑定)</option>' + state.providers[app].map(p =>
     `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
 }
 function draftOf(key) { return key === 'def' ? routesDraft.default : routesDraft.rules[Number(key)]; }
+function setRuleApp(i, v) {
+  const r = routesDraft.rules[i];
+  if (v) r.app = v; else delete r.app;
+  // 换了组,原来的池成员多半不属于这组了:清空池/单目标,免得留下看不见的悬空绑定
+  const group = state.providers[v || appOfRule(r)] || [];
+  const poolIds = (r.pool || []).map(m => typeof m === 'string' ? m : m.provider);
+  if (!poolIds.some(id => group.some(p => p.id === id))) { r.pool = []; r.provider = ''; }
+  else if (r.provider && !group.some(p => p.id === r.provider)) r.provider = '';
+  renderRoutes();
+}
 function setPoolMode(key, mode) {
   const r = draftOf(key);
-  const first = state.providers.claude[0];
+  const first = state.providers[appOfRule(r)][0];
   if (mode === 'pool') { r.pool = first ? [{ provider: first.id }] : []; r.provider = ''; }
   else { r.pool = []; r.provider = r.provider || (first ? first.id : ''); }
   renderRoutes();
@@ -583,27 +637,31 @@ async function saveRoutes() {
 
 // ---------------- 会话 ----------------
 const KIND_LABEL = { header: '会话头', metadata: 'metadata', fingerprint: '内容指纹', anon: '无身份' };
+let sessApp = '';
 function renderSessions() {
   if (!state) return;
-  const list = state.sessions || [];
+  const all = state.sessions || [];
+  const list = sessApp ? all.filter(s => (s.app || 'claude') === sessApp) : all;
   $('sess-empty').style.display = list.length ? 'none' : '';
   const pinned = list.filter(s => s.pinned).length;
   const cool = state.cooldowns || [];
   $('sess-chips').innerHTML = [
     ['活跃对话', list.length],
+    ['Claude / Codex', `${all.filter(s => (s.app || 'claude') === 'claude').length} / ${all.filter(s => s.app === 'codex').length}`],
     ['手动钉定', pinned],
-    ['本机渠道', state.providers.claude.length],
     ['冷却中渠道', cool.length],
   ].map(([k, v]) => `<div class="chip">${k}<b>${esc(String(v))}</b></div>`).join('');
 
   $('sess-body').innerHTML = list.map(s => {
+    const app = s.app || 'claude';
     const hasPool = (state.routes.rules || []).concat([state.routes.default])
-      .some(r => (r.pool || []).some(m => (typeof m === 'string' ? m : m.provider) === s.provider));
-    const opts = state.providers.claude.map(p =>
+      .some(r => ((r.pool || []).some(m => (typeof m === 'string' ? m : m.provider) === s.provider)) || r.provider === s.provider);
+    const opts = state.providers[app].map(p =>
       `<option value="${p.id}" ${p.id === s.provider ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
     return `<tr>
       <td><span class="sess-tag" title="${esc(s.key)}">${esc(s.short)}</span>
         <div style="font-size:11px;color:var(--dim);font-family:inherit">${esc(KIND_LABEL[s.kind] || s.kind || '')}</div></td>
+      <td><span class="badge ${app === 'codex' ? 'info' : 'on'}">${app === 'codex' ? 'Codex' : 'Claude'}</span></td>
       <td style="font-family:inherit"><span class="lbl" title="${esc(s.label || '')}">${esc(s.label || '-')}</span></td>
       <td><select class="pin-sel" onchange="pinSession('${esc(s.key)}', this.value)">
             <option value="" ${s.provider ? '' : 'selected'}>(未绑定)</option>${opts}</select>
@@ -660,6 +718,7 @@ async function loadStats() {
 async function loadLogs() {
   try {
     const q = new URLSearchParams();
+    if ($('f-app').value) q.set('app', $('f-app').value);
     if ($('f-provider').value.trim()) q.set('provider', $('f-provider').value.trim());
     if ($('f-model').value.trim()) q.set('model', $('f-model').value.trim());
     if ($('f-session').value.trim()) q.set('session', $('f-session').value.trim());
@@ -674,8 +733,10 @@ async function loadLogs() {
         ? `<span class="sess-tag" title="${esc(l.session_kind || '')}">${esc(l.session)}</span>`
         : '<span style="color:var(--dim)">-</span>';
       const fo = l.failover ? ' <span class="cool" title="首选渠道失败,已转移到当前渠道">↷转移</span>' : '';
+      const tr = l.wire === 'chat' && (l.kind === 'responses') ? ' <span class="cool" title="responses→chat 协议翻译">⇄翻译</span>' : '';
+      const appTag = l.app === 'codex' ? '<span class="badge info" style="font-size:10px">Cx</span> ' : '';
       return `<tr><td>${esc(l.ts.slice(5, 19))}</td><td>${sess}</td>
-        <td style="font-family:inherit">${esc(l.provider || '-')}${fo}</td>
+        <td style="font-family:inherit">${appTag}${esc(l.provider || '-')}${fo}${tr}</td>
         <td>${esc(l.model_in)}${l.model_out && l.model_out !== l.model_in ? ' → ' + esc(l.model_out) : ''}</td>
         <td>${l.in || '-'}</td><td>${l.out || '-'}</td><td>${l.cache_read || '-'}</td>
         <td>${l.ms ? l.ms + 'ms' : '-'}</td><td class="${cls}">${l.status || '-'}</td>
@@ -684,7 +745,7 @@ async function loadLogs() {
   } catch {}
 }
 function clearFilters() {
-  $('f-provider').value = ''; $('f-model').value = ''; $('f-session').value = ''; $('f-status').value = '';
+  $('f-app').value = ''; $('f-provider').value = ''; $('f-model').value = ''; $('f-session').value = ''; $('f-status').value = '';
   loadLogs();
 }
 function restartLogsTimer() { clearInterval(logsTimer); logsTimer = setInterval(() => { if ($('logs-auto').checked) { loadLogs(); loadStats(); } }, 5000); }
