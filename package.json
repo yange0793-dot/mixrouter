@@ -1,6 +1,6 @@
 {
   "name": "mixrouter",
-  "version": "3.2.1",
+  "version": "3.2.2",
   "private": true,
   "description": "本地模型路由器:Claude(Anthropic)与 Codex(OpenAI)双协议统一路由 + 会话级渠道分发(同一 Agent 多对话走不同 key)+ 子代理槽位路由(haiku 等槽位自由选渠道)+ cc-switch 式客户端配置切换(零依赖,Node >= 18)",
   "main": "mixrouter.js",

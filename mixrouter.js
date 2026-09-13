@@ -22,7 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 
-const VERSION = '3.2.1';
+const VERSION = '3.2.2';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -1436,14 +1436,14 @@ function testProvider(p) {
       creq.end();
     });
   }
-  // claude(Anthropic 系):最小 messages 请求
+  // claude(Anthropic 系):最小 messages 请求(路径复用 joinUpstreamPath,base_url 带 /v1 不会拼成 /v1/v1)
   const model = applyModel(p.models[0] || 'claude-opus-5', {});
   const body = JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] });
   return new Promise(resolve => {
     const transport = u.protocol === 'https:' ? https : http;
     const creq = transport.request({
       protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
-      path: u.pathname.replace(/\/+$/, '') + '/v1/messages', method: 'POST', timeout: TEST_TIMEOUT_MS,
+      path: joinUpstreamPath(u.pathname, '/v1/messages'), method: 'POST', timeout: TEST_TIMEOUT_MS,
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
         'x-api-key': p.api_key, 'Authorization': 'Bearer ' + p.api_key,
         'User-Agent': DEFAULT_UA, 'anthropic-version': '2023-06-01' },
