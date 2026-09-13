@@ -16,6 +16,9 @@
   **「切换」**让 Claude Code / Codex 直连渠道，**「接入 ZCode」**注册模型，**「路由模式」**指向本地代理（写入前自动备份）。
 - **路由核心**:按模型名匹配规则,目标可绑单一渠道,也可绑**渠道池**(按策略分发);
   规则可用 `app` 限定只对某一组生效
+- **子代理槽位(v3.2)**:给每个槽位(opus/sonnet/haiku/主模型,或 Codex 自拟槽名)绑定
+  「渠道 @ 模型」,客户端用别名 `mixr-<槽名>` 发请求即按槽位落点分发,优先于路由规则——
+  后台任务走便宜渠道、子代理走指定渠道,由你自由路由
 - **失败转移**:池里首选渠道 429/5xx/连不上时,趁还没给客户端写字节自动换下一个,并把该渠道打入冷却
 - **响应式控制台**：Agent 选择、概览统计、渠道搜索与启停筛选、直连/路由状态与配置漂移提示；
   会话列表可手动改绑，路由编辑器支持渠道池、策略、优先级和匹配条件，请求日志支持多条件筛选。
@@ -24,11 +27,12 @@
 ```
 ~/mixrouter/
 ├── mixrouter.js              # 核心:零依赖 Node 单进程(代理 + 控制台 API)
-├── mixctl                    # 管理命令(含 sessions / route)
-├── public/index.html         # Web 控制台(渠道 / 路由 / 会话 / 请求日志)
+├── mixctl                    # 管理命令(含 sessions / slots / route)
+├── public/index.html         # Web 控制台(渠道 / 路由 / 槽位 / 会话 / 请求日志)
 ├── providers.json            # 渠道(含 key,0600,勿提交;模板见 providers.example.json)
 ├── routes.json               # 路由规则(本地运行时状态,勿提交;模板见 routes.example.json)
 ├── sessions.json             # 会话→渠道绑定(运行时状态,含对话标签,勿提交)
+├── slots.json                # 子代理槽位(运行时状态,勿提交)
 ├── logs/                     # server.log + requests.jsonl(5MB 轮转)
 ├── scripts/import-ccswitch.js# 从 cc-switch 备份库导入渠道(claude + codex 两组)
 ├── test/                     # node --test 套件:纯函数单测 + 切换夹具 + 代理/会话/翻译全链路集成
@@ -40,7 +44,7 @@
 ```bash
 npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter.pid)
 ./mixctl stop
-./mixctl status|ls|sessions|logs [n]|route <claude|codex>|open
+./mixctl status|ls|sessions|slots|logs [n]|route <claude|codex|zcode> [--slots]|open
 ```
 
 - **代理端口 8787**,按端点自动分派到对应渠道组:
@@ -102,6 +106,25 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 ./mixctl route zcode                 # 默认 Anthropic
 ./mixctl route zcode responses       # OpenAI Responses
 ./mixctl route zcode chat            # OpenAI Chat
+```
+
+## 子代理槽位(v3.2)
+
+想让 Claude Code 的后台任务走便宜渠道、子代理走指定模型,或给 Codex 的多角色 worker 各配各的上游?
+给槽位绑定「渠道 @ 模型」,客户端拿别名当模型名发请求,代理按槽位精确分发,**优先于一切路由规则**:
+
+- **Claude Code 四个固定槽**:`main`(写 `ANTHROPIC_MODEL`)/ `opus` / `sonnet` / `haiku`
+  (写对应 `ANTHROPIC_DEFAULT_*_MODEL`)。在控制台「渠道」页配置后点**「应用槽位到客户端」**,
+  env 写入别名(`mixr-opus` 等,自动备份;未配置槽的旧 `mixr-` 别名会被清掉,手设的真实模型名不动)。
+  此后 CC 的 Haiku 槽请求(标题生成、后台小任务、子代理)就会落到你选的渠道+模型上。
+- **Codex 自拟槽名**:如 `worker`、`reviewer`。客户端处于路由模式后直接用:
+  `codex exec -m mixr-worker` 或 `codex --model mixr-reviewer`;`GET /v1/models` 也会列出这些别名。
+- 落点模型:Claude 槽绑定时选定;Codex 槽用渠道自带模型名。槽位请求不走会话粘性、不进渠道池,
+  渠道停用/删除会得到明确的 `provider_disabled_error` / `no_route_error`。
+
+```bash
+./mixctl slots               # 查看槽位表(别名 → 渠道 @ 模型)
+./mixctl route claude --slots   # 切路由模式并同时写入槽位 env
 ```
 
 ## 会话级渠道分发(v3 核心)

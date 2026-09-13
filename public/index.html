@@ -275,6 +275,12 @@
             <p id="zcode-group-hint"></p>
           </div>
           <div class="liveinfo" id="liveinfo"><div class="empty"><b>正在读取客户端配置</b>连接本地控制台后展示实际配置，不代表上游连通性。</div></div>
+          <div class="panel" id="slots-panel" hidden>
+            <h2>子代理槽位</h2>
+            <p class="hint" id="slots-hint"></p>
+            <div id="slots-rows"></div>
+            <div class="savebar"><button class="primary" id="slots-apply" onclick="applySlotsClaude()" disabled>应用槽位到客户端</button><span class="msg" id="slots-msg" role="status"></span></div>
+          </div>
           <div class="banner" id="drift-banner" role="status"><span id="drift-text"></span></div>
           <div class="channel-toolbar">
             <div><h2 id="channel-heading">渠道库</h2><p id="channel-count" aria-live="polite">等待状态数据</p></div>
@@ -450,7 +456,7 @@ function refresh() {
       if (!next.providers || !next.routes || !next.current || !next.live) throw new Error('状态数据不完整');
       state = next; lastSync = new Date();
       if (!routesDraft) { routesDraft = structuredClone(state.routes); routesBase = JSON.stringify(state.routes); renderRoutes(); }
-      renderOverview(); setConnection(true); updateRouteStatus();
+      renderOverview(); setConnection(true); updateRouteStatus(); renderSlots();
       if (view === 'providers') renderProviders();
       if (view === 'sessions' && !activeDialog && !$('sess-body').contains(document.activeElement)) renderSessions();
       return true;
@@ -480,7 +486,7 @@ function setApp(app) {
   curApp = app;
   for (const key of Object.keys(APPS)) { const tab = $('tab-' + key); tab.classList.toggle('active', key === app); tab.setAttribute('aria-selected', String(key === app)); tab.tabIndex = key === app ? 0 : -1; }
   $('agent-panel').setAttribute('aria-labelledby', 'tab-' + app);
-  $('zcode-protocol').hidden = app !== 'zcode'; renderProviders();
+  $('zcode-protocol').hidden = app !== 'zcode'; renderProviders(); renderSlots();
 }
 function setZcodeWire(wire) { if (['anthropic', 'responses', 'chat'].includes(wire)) { zcodeWire = wire; renderProviders(); } }
 document.querySelector('.apptabs').addEventListener('keydown', e => {
@@ -653,6 +659,108 @@ async function testProvider(id) {
   try { testResults[id] = await api('/api/providers/' + encodeURIComponent(id) + '/test', { method: 'POST' }); }
   catch (e) { testResults[id] = { ok: false, error: e.message }; }
   if (view === 'providers') renderProviders();
+}
+
+// ---------------- 子代理槽位 ----------------
+// 槽位 = 别名(mixr-…)→「渠道 @ 模型」。Claude 四个固定槽写进客户端 env;
+// Codex 槽名自拟,客户端用 codex -m mixr-<槽名> 选用。别名请求优先于一切路由规则。
+const SLOT_LABELS = { main: '主模型 main', opus: 'Opus 槽', sonnet: 'Sonnet 槽', haiku: 'Haiku 槽' };
+const slotsOf = () => state?.slots || { claude: [], codex: [] };
+function slotChannelOptions(sel, group) {
+  return '<option value="">(未配置)</option>' + providers(group).map(p =>
+    `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '（停用）'}</option>`).join('');
+}
+function slotBadge(s, liveRouter) {
+  if (!s.provider) return '<span class="badge off">未配置</span>';
+  if (!s.enabled) return '<span class="badge off">渠道停用</span>';
+  if (curApp === 'claude') {
+    if (!liveRouter) return '<span class="badge info">已配置 · 未切路由</span>';
+    const env = state.live?.claude?.slots?.[s.name] || '';
+    return env === s.alias ? '<span class="badge on">已写入</span>' : '<span class="badge drift">未同步</span>';
+  }
+  return '<span class="badge info">已配置</span>';
+}
+function claudeSlotRow(s) {
+  const ch = providers('claude').find(p => p.id === s.provider);
+  const models = (ch && ch.models) || [];
+  const modelOpts = (s.provider ? [['', !s.model, '(渠道第一个模型)']] : [])
+    .concat(s.model && !models.includes(s.model) ? [[s.model, true, s.model]] : [])
+    .concat(models.map(m => [m, m === s.model, m]))
+    .map(([m, sel, label]) => `<option value="${esc(m)}" ${sel ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  return `<div class="rc-line">
+    <label class="field" style="flex:0 0 auto;min-width:170px">${SLOT_LABELS[s.name] || esc(s.name)}<span class="mono">${esc(s.alias)} · ${esc(s.env || '')}</span></label>
+    <label class="field" style="flex:2">渠道<select aria-label="${esc(s.name)} 槽渠道" onchange="setSlot('claude','${s.name}','provider',this.value)">${slotChannelOptions(s.provider, 'claude')}</select></label>
+    <label class="field" style="flex:2">落点模型<select aria-label="${esc(s.name)} 槽模型" ${s.provider ? '' : 'disabled'} onchange="setSlot('claude','${s.name}','model',this.value)">${modelOpts || '<option value="">(渠道未配模型，透传别名)</option>'}</select></label>
+    <span style="align-self:center">${slotBadge(s, !!state.live?.claude?.router)}</span>
+    ${s.provider ? `<button class="iconbtn" aria-label="清空 ${esc(s.name)} 槽" onclick="clearSlot('claude','${s.name}')">×</button>` : ''}
+  </div>`;
+}
+function codexSlotRow(s) {
+  return `<div class="rc-line">
+    <label class="field" style="flex:0 0 auto;min-width:170px">${esc(s.name)}<span class="mono">${esc(s.alias)} · codex -m ${esc(s.alias)}</span></label>
+    <label class="field" style="flex:2">渠道<select aria-label="${esc(s.name)} 渠道" onchange="setSlot('codex','${s.name}','provider',this.value)">${slotChannelOptions(s.provider, 'codex')}</select></label>
+    <span style="align-self:center">${slotBadge(s, false)}</span>
+    ${s.provider ? `<button class="iconbtn" aria-label="删除 ${esc(s.name)} 槽" onclick="clearSlot('codex','${s.name}')">×</button>` : ''}
+  </div>`;
+}
+function renderSlots() {
+  const panel = $('slots-panel');
+  if (!state || curApp === 'zcode') { panel.hidden = true; return; }
+  panel.hidden = false;
+  const isClaude = curApp === 'claude';
+  $('slots-hint').textContent = isClaude
+    ? '把每个槽位绑定到「渠道 @ 模型」：应用后客户端 env 写入别名（mixr-…），该槽的所有请求——含子代理与后台任务——按槽位落点分发，优先于路由规则。'
+    : 'Codex 槽位是路由别名：客户端处于路由模式后，codex exec -m mixr-<槽名> 即按槽位落点分发；GET /v1/models 也会列出这些别名。';
+  $('slots-apply').hidden = !isClaude;
+  $('slots-apply').disabled = !online;
+  const list = slotsOf()[curApp] || [];
+  const rows = isClaude
+    ? list.map(claudeSlotRow).join('')
+    : list.map(codexSlotRow).join('') + `<div class="rc-line">
+        <label class="field" style="flex:0 0 auto;min-width:170px">新槽位<span class="mono">别名 mixr-&lt;槽名&gt;</span></label>
+        <label class="field" style="flex:1">槽位名<input id="slot-new-name" placeholder="如 worker" autocomplete="off" spellcheck="false"></label>
+        <label class="field" style="flex:2">渠道<select id="slot-new-provider">${slotChannelOptions('', 'codex')}</select></label>
+        <button class="small" style="align-self:center" onclick="addCodexSlot()" ${online ? '' : 'disabled'}>＋ 添加槽位</button>
+      </div>`;
+  // 轮询不重绘正在操作的槽位表:内容没变跳过;焦点在表内时不打扰
+  if ($('slots-rows').innerHTML !== rows && !($('slots-rows').contains(document.activeElement) || activeDialog)) $('slots-rows').innerHTML = rows;
+}
+async function putSlot(app, name, value) {
+  if (!online) { toast('控制台离线，未保存槽位改动', 'err'); return false; }
+  try { await api('/api/slots', { method: 'PUT', body: JSON.stringify({ [app]: { [name]: value } }) }); await refresh(); return true; }
+  catch (e) { toast('槽位保存失败：' + e.message, 'err'); return false; }
+}
+async function setSlot(app, name, field, value) {
+  if (field === 'provider' && !value) return clearSlot(app, name);
+  const s = (slotsOf()[app] || []).find(x => x.name === name);
+  if (!s) return;
+  const val = field === 'provider'
+    ? { provider: value, ...(app === 'claude' ? { model: (providers('claude').find(p => p.id === value)?.models || [s.model])[0] || '' } : {}) }
+    : { provider: s.provider, model: value };
+  if (await putSlot(app, name, val)) toast(`槽位 ${name} 已更新`, 'ok');
+}
+async function clearSlot(app, name) {
+  if (await putSlot(app, name, null)) toast(`槽位 ${name} 已清空`, 'ok');
+}
+async function addCodexSlot() {
+  const name = ($('slot-new-name').value || '').trim().toLowerCase();
+  const provider = $('slot-new-provider').value;
+  if (!/^[a-z0-9][a-z0-9-]{0,23}$/.test(name)) return toast('槽位名只能用小写字母、数字、连字符（≤24 位）', 'err');
+  if (!provider) return toast('请选择渠道', 'err');
+  if (await putSlot('codex', name, { provider })) { toast(`槽位 ${name} 已添加，别名 mixr-${name}`, 'ok'); $('slot-new-name').value = ''; }
+}
+async function applySlotsClaude() {
+  if (!canConnect('claude')) return;
+  const configured = slotsOf().claude.filter(s => s.provider);
+  const lines = configured.length
+    ? configured.map(s => `· ${s.env}=${s.alias} → ${s.provider_name} @ ${s.model || '(渠道未配模型)'}`).join('\n')
+    : '· 槽位表为空：本次只指向路由并清理以前写入的 mixr- 别名';
+  const message = `将 Claude Code 指向 ${routerBase('claude') || '本地路由'}，并按当前槽位表同步槽位 env：\n${lines}\n未配置槽位的既有 mixr- 别名会被清掉；你手设的其他 env 值一律保留。\n写入 ${APPS.claude.cfg}（原文件自动备份），Claude Code 需重启会话生效。`;
+  if (!await askConfirm('应用子代理槽位', message, '应用并切路由')) return;
+  try {
+    await api('/api/router/claude', { method: 'POST', body: JSON.stringify({ slots: true }) });
+    toast('槽位 env 已写入；请重启 Claude Code 会话生效', 'ok'); await refresh();
+  } catch (e) { toast('应用失败：' + e.message, 'err'); }
 }
 
 // ---------------- 路由 ----------------

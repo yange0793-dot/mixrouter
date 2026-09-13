@@ -10,6 +10,10 @@ routes.json.tmp
 sessions.json
 sessions.json.tmp
 
+# 子代理槽位(运行时状态;含渠道引用,无密钥但属本机状态)
+slots.json
+slots.json.tmp
+
 # 客户端配置切换时留下的备份
 *.bak-mixui-*
 

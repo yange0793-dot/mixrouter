@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // ============================================================================
-// mixrouter v3.1 — 本地模型路由器 + cc-switch 式客户端配置切换
+// mixrouter v3.2 — 本地模型路由器 + cc-switch 式客户端配置切换
 //   :8787  代理端口  Claude 组:/v1/messages、count_tokens(Anthropic 协议)
 //                   Codex  组:/v1/responses、/v1/chat/completions(OpenAI 协议)
-//   :8788  控制台   渠道(Claude Code / Codex 两组)/ 路由 / 会话 / 日志
-// 零依赖,Node >= 18。数据文件:providers.json、routes.json、sessions.json
+//   :8788  控制台   渠道(Claude Code / Codex 两组)/ 路由 / 槽位 / 会话 / 日志
+// 零依赖,Node >= 18。数据文件:providers.json、routes.json、slots.json、sessions.json
 //
 // v3 核心:同一个 Agent 的多个对话可以走不同渠道(key)
 //   Claude Code 每个对话都带 x-claude-code-session-id(metadata.user_id 里也有),
@@ -22,7 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 
-const VERSION = '3.1.0';
+const VERSION = '3.2.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -52,6 +52,8 @@ const ROUTER_TOKEN = 'mixrouter-local';
 const ROUTER_SECTION = 'mixr-router';
 // ---- v3 会话分发 ----
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+// ---- v3.2 子代理槽位 ----
+const SLOTS_FILE = path.join(DATA_DIR, 'slots.json');
 // 会话绑定空闲多久后失效(默认 12h);同一对话中途换渠道会打断 prompt 缓存,故给足
 const SESSION_TTL_MS = Number(process.env.MIXR_SESSION_TTL_MIN || 720) * 60 * 1000;
 const SESSION_MAX = Number(process.env.MIXR_SESSION_MAX || 1000);
@@ -113,6 +115,100 @@ let routes = loadJson(ROUTES_FILE, null);
 if (!routes || !Array.isArray(routes.rules)) routes = defaultRoutes();
 else routes = { rules: routes.rules.map(normalizeRule), default: normalizeRule(routes.default || {}) };
 const saveRoutes = () => saveJson(ROUTES_FILE, routes);
+
+// ---------------------------------------------------------------- 子代理槽位(v3.2)
+// 槽位 = 一个命名别名绑定「渠道 + 模型」,让客户端的子代理/后台任务各走各的上游:
+//   Claude 组固定四个槽(main/opus/sonnet/haiku),别名 mixr-<槽名> 写进客户端 env;
+//   Codex 组槽名自拟(如 worker/reviewer),codex exec -m mixr-<槽名> 即可选用。
+// 请求模型名精确等于别名时按槽位分发,优先于一切路由规则;槽位目标不受会话粘性影响
+// (粘性只在同一条规则的池内生效),渠道停用会给出明确的 provider_disabled_error。
+const CLAUDE_SLOTS = ['main', 'opus', 'sonnet', 'haiku'];
+const CLAUDE_SLOT_ENV = {
+  main: 'ANTHROPIC_MODEL',
+  opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+};
+const slotAlias = (app, name) => 'mixr-' + name;
+const CODEX_SLOT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+function loadSlots() {
+  const raw = loadJson(SLOTS_FILE, null);
+  return {
+    claude: (raw && typeof raw.claude === 'object' && raw.claude) || {},
+    codex: (raw && typeof raw.codex === 'object' && raw.codex) || {},
+  };
+}
+let slotMap = loadSlots();
+const saveSlots = () => saveJson(SLOTS_FILE, { version: 1, claude: slotMap.claude, codex: slotMap.codex });
+
+// 请求模型名 → 命中的槽位。返回 null 表示不是槽位别名,继续走普通规则。
+// model 落点:Claude 槽用绑定时选的模型(空串回退渠道第一个);Codex 渠道自带模型名。
+function resolveSlot(app, modelIn) {
+  const m = String(modelIn || '').trim().toLowerCase();
+  if (!m.startsWith('mixr-')) return null;
+  const reg = slotMap[app] || {};
+  for (const name of Object.keys(reg)) {
+    const s = reg[name];
+    if (!s || !s.provider) continue;
+    if (m !== slotAlias(app, name)) continue;
+    const p = storeOf(app).find(x => x.id === s.provider) || null;
+    const model = app === 'codex' ? ((p && p.model) || '')
+      : (s.model || (p && Array.isArray(p.models) && p.models[0]) || '');
+    return {
+      name,
+      provider: p,
+      model,
+      // rule.model 带上落点模型,poolMembers 才能把 Claude 槽的模型送进转发(空 = 透传别名)
+      rule: {
+        id: `slot:${app}/${name}`, match: slotAlias(app, name), provider: s.provider,
+        model, pool: [], strategy: 'round_robin', priority: 1000, app, when: {}, enabled: true,
+      },
+    };
+  }
+  return null;
+}
+
+// 槽位写入校验:返回错误文案或 null。body 形如 {claude:{opus:{provider,model}|null}, codex:{...}}
+function validateSlotPut(body) {
+  for (const app of ['claude', 'codex']) {
+    const patch = body[app];
+    if (patch === undefined) continue;
+    if (!zcodeConfig.isObject(patch)) return `${app} 槽位必须是对象`;
+    for (const [name, val] of Object.entries(patch)) {
+      if (app === 'claude' && !CLAUDE_SLOTS.includes(name))
+        return `Claude 槽位只能是 ${CLAUDE_SLOTS.join(' / ')},收到 "${name}"`;
+      if (app === 'codex' && !CODEX_SLOT_NAME_RE.test(name))
+        return `Codex 槽位名只能用小写字母、数字、连字符(≤24 位),收到 "${name}"`;
+      if (val === null) continue;
+      if (!zcodeConfig.isObject(val) || !val.provider || typeof val.provider !== 'string')
+        return `槽位 "${name}" 必须是 {provider, model} 或 null`;
+      if (!findProvider(val.provider) || providerApp(val.provider) !== app)
+        return `槽位 "${name}" 绑定的渠道不存在(须为 ${app === 'codex' ? 'Codex' : 'Claude'} 组渠道)`;
+      if (app === 'claude' && val.model !== undefined && typeof val.model !== 'string')
+        return `槽位 "${name}" 的 model 必须是字符串`;
+    }
+  }
+  return null;
+}
+
+// 控制台用:槽位一览(带渠道名/落点模型/停用状态;不含密钥)
+function slotsPublic() {
+  const entry = (app, name) => {
+    const s = (slotMap[app] || {})[name];
+    const p = s && s.provider ? findProvider(s.provider) : null;
+    const model = p ? (app === 'codex' ? (p.model || '') : (s.model || (Array.isArray(p.models) && p.models[0]) || '')) : (s && s.model) || '';
+    return {
+      name, alias: slotAlias(app, name), env: app === 'claude' ? CLAUDE_SLOT_ENV[name] : '',
+      provider: s ? s.provider : '', provider_name: p ? p.name : '',
+      enabled: !!p && p.enabled !== false, model,
+    };
+  };
+  return {
+    claude: CLAUDE_SLOTS.map(n => entry('claude', n)),
+    codex: Object.keys(slotMap.codex || {}).filter(n => slotMap.codex[n]).map(n => entry('codex', n)),
+  };
+}
 
 // 从控制台存进来的规则一律过一遍这里:字段类型收敛,免得坏数据埋到转发时才炸
 function normalizeRule(r) {
@@ -492,6 +588,14 @@ function matchWhen(rule, ctx) {
   return true;
 }
 function resolveRoute(modelIn, ctx = {}, app = 'claude') {
+  // 槽位别名精确匹配,优先于一切规则(客户端槽位 env 写的就是别名,不能被子串规则截胡)
+  const slot = resolveSlot(app, modelIn);
+  if (slot) {
+    const members = poolMembers(slot.rule, app);
+    return { rule: slot.rule, members, slot: slot.name,
+      provider: members.length ? members[0].provider : null,
+      model: (members.length ? members[0].model : slot.model) || modelIn, strategy: 'round_robin' };
+  }
   const m = String(modelIn || '').toLowerCase();
   const order = routes.rules
     .map((r, i) => ({ r, i }))
@@ -807,7 +911,7 @@ const upstreamPathOf = (wire, ep) => wire === 'anthropic' ? ep.path : (wire === 
 // Channel bases may already end in /v1. Keep custom prefixes, append the version once.
 const joinUpstreamPath = (pathname, endpoint) => pathname.replace(/\/+$/, '').replace(/\/v1$/, '') + endpoint;
 
-// GET /v1/models:只读清单(Codex 组渠道的模型 + 路由目标模型),给会探模型的客户端用
+// GET /v1/models:只读清单(Codex 组渠道的模型 + 路由目标模型 + Codex 槽位别名),给会探模型的客户端用
 function modelList() {
   const seen = new Set(), data = [];
   const add = (id, owner) => {
@@ -817,6 +921,9 @@ function modelList() {
     data.push({ id, object: 'model', owned_by: owner });
   };
   for (const p of store.codex) if (p.enabled !== false && p.model) add(p.model, p.name);
+  for (const [name, s] of Object.entries(slotMap.codex || {})) {
+    if (s && s.provider) add(slotAlias('codex', name), 'slot:' + name);
+  }
   for (const r of [...(routes.rules || []), routes.default || {}]) {
     if (!r) continue;
     if (r.model) add(r.model, 'route');
@@ -877,7 +984,9 @@ function proxyHandler(req, res) {
         '路由命中的 Codex 渠道都是 responses 协议,收不了 /v1/chat/completions;把渠道 wire_api 改成 chat,或让客户端改用 /v1/responses');
       members = chatOnly;
     }
-    if (!members.length) return protoError(res, ep.app, 503, 'no_route_error', ep.app === 'codex'
+    if (!members.length) return protoError(res, ep.app, 503, 'no_route_error', resolved.slot
+      ? `槽位 "${resolved.slot}" 的别名 "${modelIn}" 已无可用渠道:绑定的渠道可能已被删除,请在控制台重新选择槽位目标`
+      : ep.app === 'codex'
       ? `模型 "${modelIn}" 没有匹配的 Codex 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 的「路由」页为它配目标(要选 Codex 组渠道)`
       : `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
 
@@ -1180,13 +1289,22 @@ function switchCodex(p) {
 // 路由模式:把客户端指向本机代理,流量开始按路由规则分发
 //   Claude Code → settings.json 的 env(模型名/槽位保持不动,路由就靠它匹配)
 //   Codex      → config.toml 顶层 model_provider 换成 mixr-router,顶层 model 保持不动
-function switchClaudeRouter() {
+// options.slots = true 时按当前槽位表同步 Claude 的槽位 env:
+//   已配置的槽写别名(mixr-…),没配置的槽只清理以前写入过的别名残留,用户手设的真实模型名不动
+function switchClaudeRouter(options = {}) {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')); } catch {}
   backupFile(CLAUDE_SETTINGS);
   cfg.env = cfg.env || {};
   cfg.env.ANTHROPIC_BASE_URL = ROUTER_URL;
   cfg.env.ANTHROPIC_AUTH_TOKEN = ROUTER_TOKEN;
+  if (options.slots) {
+    for (const [name, envKey] of Object.entries(CLAUDE_SLOT_ENV)) {
+      const s = (slotMap.claude || {})[name];
+      if (s && s.provider) cfg.env[envKey] = slotAlias('claude', name);
+      else if (String(cfg.env[envKey] || '').startsWith('mixr-')) delete cfg.env[envKey];
+    }
+  }
   fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(cfg, null, 2) + '\n');
   try { fs.chmodSync(CLAUDE_SETTINGS, 0o600); } catch {}
 }
@@ -1201,7 +1319,7 @@ function switchCodexRouter() {
 function switchRouter(app, options = {}) {
   if (app === 'zcode') return switchZcodeRouter(options);
   if (app === 'codex') return switchCodexRouter();
-  if (app === 'claude') return switchClaudeRouter();
+  if (app === 'claude') return switchClaudeRouter(options);
   throw zcodeConfig.invalid('未知客户端 app');
 }
 
@@ -1270,6 +1388,8 @@ function liveState() {
   const curClaude = current.claude && current.claude !== ROUTER_ID ? findProvider(current.claude) : null;
   const claudeRouter = trimSlash(claudeBase) === ROUTER_URL;
   live.claude = { base_url: claudeBase, model: env.ANTHROPIC_MODEL || '', router: claudeRouter,
+    // 槽位 env 现值(控制台对比槽位表,提示漂移):别名 = 已托管,其他值 = 用户手设
+    slots: Object.fromEntries(CLAUDE_SLOTS.map(n => [n, env[CLAUDE_SLOT_ENV[n]] || ''])),
     match: claudeRouter
       // 路由模式:current 记的是 "@router" 哨兵,或库里有渠道自己就指向代理
       ? (current.claude === ROUTER_ID
@@ -1373,7 +1493,7 @@ function apiHandler(req, res) {
         uptime_s: Math.floor(process.uptime()), pid: process.pid,
         stats: todayStats(),
         providers: { claude: store.claude.map(publicProvider), codex: store.codex.map(publicProvider) },
-        current, live: liveState(), routes,
+        current, live: liveState(), routes, slots: slotsPublic(),
         sessions: sessionList(),
         cooldowns: Object.entries(cooldowns).map(([id, until]) => ({ provider: id, until, name: (findProvider(id) || {}).name || id })),
         session_ttl_min: Math.round(SESSION_TTL_MS / 60000), cooldown_s: Math.round(COOLDOWN_MS / 1000),
@@ -1480,6 +1600,14 @@ function apiHandler(req, res) {
         store[app] = store[app].filter(x => x.id !== prov.id);
         if (current[app] === prov.id) current[app] = null;
         if (current.zcode === prov.id) current.zcode = null;
+        // 引用该渠道的槽位一并摘除,免得别名路由到不存在的渠道
+        let slotChanged = false;
+        for (const g of ['claude', 'codex']) {
+          for (const [name, s] of Object.entries(slotMap[g])) {
+            if (s && s.provider === prov.id) { delete slotMap[g][name]; slotChanged = true; }
+          }
+        }
+        if (slotChanged) saveSlots();
         saveStore();
         return send(200, { ok: true });
       }
@@ -1514,18 +1642,20 @@ function apiHandler(req, res) {
     }
 
     // ---- 路由模式:把客户端整体指向本机代理(此后流量按路由规则分发)
+    //   body.slots = true(Claude)时同时按槽位表写入/清理槽位 env(子代理各走各的上游)
     m = p.match(/^\/api\/router\/([^/]+)$/);
     if (req.method === 'POST' && m) {
       const app = m[1];
       if (!['claude', 'codex', 'zcode'].includes(app)) return send(400, { error: '未知客户端 app' });
       const b = await readObject();
       if (b.app !== undefined && b.app !== app) return send(400, { error: 'app 与路径不一致' });
+      if (b.slots !== undefined && typeof b.slots !== 'boolean') return send(400, { error: 'slots 必须是布尔值' });
       if (app === 'codex' && !store.codex.length) return send(400, { error: '还没有 Codex 组渠道,先添加渠道再切路由模式' });
       if (app === 'claude' && !store.claude.length) return send(400, { error: '还没有 Claude 组渠道,先添加渠道再切路由模式' });
       try { switchRouter(app, b); } catch (e) { return send(e.statusCode || 500, { error: app === 'zcode' && !e.statusCode ? '写入 ZCode 配置失败，请检查配置格式、权限及自有 provider 冲突' : '写入配置失败: ' + e.message }); }
       current[app] = ROUTER_ID;
       saveStore();
-      return send(200, { ok: true, app, live: liveState()[app] });
+      return send(200, { ok: true, app, live: liveState()[app], ...(app === 'claude' && b.slots ? { slots: slotsPublic().claude } : {}) });
     }
 
     // ---- 会话:列表 / 手动改绑(把某个对话钉到指定渠道)/ 解绑
@@ -1579,6 +1709,28 @@ function apiHandler(req, res) {
       return send(200, { ok: true });
     }
 
+    // ---- 子代理槽位:查 / 改(值 null = 删除该槽;按组部分更新)
+    if (req.method === 'GET' && p === '/api/slots') {
+      return send(200, { slots: slotsPublic() });
+    }
+    if (req.method === 'PUT' && p === '/api/slots') {
+      const b = await readObject();
+      const err = validateSlotPut(b);
+      if (err) return send(400, { error: err });
+      for (const app of ['claude', 'codex']) {
+        const patch = b[app];
+        if (!zcodeConfig.isObject(patch)) continue;
+        for (const [name, val] of Object.entries(patch)) {
+          if (val === null) { delete slotMap[app][name]; continue; }
+          slotMap[app][name] = app === 'claude'
+            ? { provider: val.provider, model: String(val.model || '').trim() }
+            : { provider: val.provider };
+        }
+      }
+      saveSlots();
+      return send(200, { ok: true, slots: slotsPublic() });
+    }
+
     // ---- 静态文件
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       try {
@@ -1628,6 +1780,8 @@ module.exports = {
   ENDPOINTS, classifyProxyRequest, wireOf, upstreamPathOf, modelList, buildOpenAiHeaders,
   codexHeaderSessionId, codexBodySessionId, codexFirstUserText, codexUserTexts, extractUsageOpenAI, extractUsageFor,
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
+  // v3.2 子代理槽位
+  slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
   ROUTER_ID, ROUTER_URL, ROUTER_TOKEN, ROUTER_SECTION,
   _state: {
     get store() { return store; }, set store(v) { store = v; },
@@ -1635,6 +1789,7 @@ module.exports = {
     get current() { return current; }, set current(v) { current = v; },
     get sessions() { return sessions; }, set sessions(v) { sessions = v; },
     get cooldowns() { return cooldowns; }, set cooldowns(v) { cooldowns = v; },
+    get slotMap() { return slotMap; }, set slotMap(v) { slotMap = v; },
     resetPools() { pools = {}; },
     bindSession(key, providerId, extra = {}) {
       sessions.set(key, { providerId, model: '', ruleId: '', label: '', kind: 'header',
