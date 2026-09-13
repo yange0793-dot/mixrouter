@@ -61,7 +61,8 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
 - **控制台 8788**：顶部可选 Claude Code / Codex / ZCode；渠道支持搜索、筛选、测试、编辑、删除及客户端接入。
   配置状态与库内记录不一致时显示漂移告警；另有路由编辑、会话列表与实时请求日志。
 - **切换(Claude Code)**:只改 `~/.claude/settings.json` 的 env 里 `ANTHROPIC_BASE_URL /
-  AUTH_TOKEN / MODEL`(+ 可选槽位 `ANTHROPIC_DEFAULT_*_MODEL`,渠道没填就不动),其余键原样保留。
+  AUTH_TOKEN / MODEL`(+ 可选槽位 `ANTHROPIC_DEFAULT_OPUS/SONNET/FABLE/HAIKU_MODEL` 与
+  `CLAUDE_CODE_SUBAGENT_MODEL`,渠道模型映射里没填就不动),其余键原样保留。
 - **切换(Codex)**:对 `~/.codex/config.toml` 做外科手术——顶层 `model / model_provider`
   原位替换,追加 `[model_providers.mixr-*]` section(沿用本机已验证的
   `experimental_bearer_token` 模式,不依赖 auth.json),用户自己的 section 一律不碰;

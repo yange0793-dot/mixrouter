@@ -49,8 +49,9 @@ for (const r of rows) {
     store.claude.push({
       id: 'p' + (++n), name: r.name, base_url: base.replace(/\/+$/, ''), api_key: key,
       models: [...new Set([env.ANTHROPIC_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL,
-        env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL].filter(Boolean))],
-      slots: { opus: env.ANTHROPIC_DEFAULT_OPUS_MODEL || '', sonnet: env.ANTHROPIC_DEFAULT_SONNET_MODEL || '', haiku: env.ANTHROPIC_DEFAULT_HAIKU_MODEL || '' },
+        env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL,
+        env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.CLAUDE_CODE_SUBAGENT_MODEL].filter(Boolean))],
+      slots: { opus: env.ANTHROPIC_DEFAULT_OPUS_MODEL || '', sonnet: env.ANTHROPIC_DEFAULT_SONNET_MODEL || '', fable: env.ANTHROPIC_DEFAULT_FABLE_MODEL || '', haiku: env.ANTHROPIC_DEFAULT_HAIKU_MODEL || '', subagent: env.CLAUDE_CODE_SUBAGENT_MODEL || '' },
       enabled: !knownDead(base),
       note: (r.notes || '').trim() || (knownDead(base) ? '2026-08-01 实测令牌无效,导入时默认停用' : ''),
       created_at: new Date().toISOString(),

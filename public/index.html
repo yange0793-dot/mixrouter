@@ -331,7 +331,7 @@
         <label for="m-key">API Key <span id="m-key-hint"></span></label><input type="password" id="m-key" placeholder="sk-…" autocomplete="new-password" spellcheck="false">
         <div id="m-claude-fields">
           <label for="m-models">模型列表（逗号分隔；支持 [1M] 后缀）</label><input type="text" id="m-models" placeholder="claude-opus-5[1M], claude-sonnet-4-6" spellcheck="false">
-          <fieldset><legend>Claude Code 槽位模型（可选，留空保留现有值）</legend><div class="grid2"><div><label for="m-slot-opus">Opus 槽</label><input type="text" id="m-slot-opus"></div><div><label for="m-slot-sonnet">Sonnet 槽</label><input type="text" id="m-slot-sonnet"></div><div><label for="m-slot-haiku">Haiku 槽</label><input type="text" id="m-slot-haiku"></div></div></fieldset>
+          <fieldset><legend>模型映射（写入客户端 env；留空保留现有值，值可带 [1M] 能力声明）</legend><div class="grid2"><div><label for="m-slot-opus">Opus 槽</label><input type="text" id="m-slot-opus"></div><div><label for="m-slot-sonnet">Sonnet 槽</label><input type="text" id="m-slot-sonnet"></div><div><label for="m-slot-fable">Fable 槽</label><input type="text" id="m-slot-fable"></div><div><label for="m-slot-haiku">Haiku 槽</label><input type="text" id="m-slot-haiku"></div><div><label for="m-slot-subagent">Subagent 槽（CLAUDE_CODE_SUBAGENT_MODEL）</label><input type="text" id="m-slot-subagent" placeholder="如 gpt-6-astra[1M]"></div></div></fieldset>
         </div>
         <div id="m-codex-fields" style="display:none">
           <label for="m-model">模型 <span aria-hidden="true">*</span></label><input type="text" id="m-model" placeholder="如 gpt-5.6-sol" spellcheck="false">
@@ -551,7 +551,7 @@ function renderProviders() {
     return `<article class="card ${p.enabled ? '' : 'off'} ${verified ? 'cur' : ''}">
       <div class="top"><span class="cdot" aria-hidden="true"></span><h3 class="name">${esc(p.name)}</h3>${isCur ? `<span class="badge ${verified ? 'on' : 'off'}">${verified ? '已写入配置' : '库内选中'}</span>` : ''}${drift && online ? '<span class="badge drift">配置不一致</span>' : ''}<span class="badge ${p.enabled ? 'info' : 'off'}">${p.enabled ? '启用' : '停用'}</span></div>
       <div class="mono endpoint">${esc(p.base_url)}</div><div class="tags"><span class="tag">${esc(wire)}</span>${models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}${p.drop_images ? '<span class="tag">纯文本</span>' : ''}</div>
-      ${group === 'claude' && Object.values(p.slots || {}).some(Boolean) ? `<div class="mono">槽位 ${esc(p.slots.opus || '—')} / ${esc(p.slots.sonnet || '—')} / ${esc(p.slots.haiku || '—')}</div>` : ''}
+      ${group === 'claude' && Object.values(p.slots || {}).some(Boolean) ? `<div class="mono">槽位 ${['opus', 'sonnet', 'fable', 'haiku', 'subagent'].map(k => p.slots?.[k] ? `${k}=${esc(p.slots[k])}` : null).filter(Boolean).join(' · ') || '—'}</div>` : ''}
       <div class="mono">API key · ${esc(p.key_masked || '未配置')}</div>${p.note ? `<p class="note">${esc(p.note)}</p>` : ''}
       ${isZcode && group === 'codex' && wire !== zcodeWire ? `<p class="note">此渠道按 ${esc(wire)} 协议接入，与上方路由协议选择不同。</p>` : ''}${tline}
       <div class="foot"><button class="small ${verified ? 'cur' : 'primary'}" data-action="switch" data-provider="${esc(p.id)}" onclick="switchProvider(${arg})" ${locked ? 'disabled' : ''}>${isZcode ? '接入 ZCode' : isCur ? '重新写入' : '切换'}</button><button class="small" data-action="test" data-provider="${esc(p.id)}" onclick="testProvider(${arg})" ${!online || t?.wait ? 'disabled' : ''}>测试</button><button class="small" data-action="edit" data-provider="${esc(p.id)}" onclick="openProvider(${arg})">编辑</button><button class="small" data-action="toggle" data-provider="${esc(p.id)}" onclick="toggleProvider(${arg})" ${!online ? 'disabled' : ''}>${p.enabled ? '停用' : '启用'}</button><button class="small danger" data-action="delete" data-provider="${esc(p.id)}" onclick="delProvider(${arg})" ${!online ? 'disabled' : ''}>删除</button></div></article>`;
@@ -579,7 +579,7 @@ function openProvider(id) {
   $('m-model').required = isCodex;
   $('m-model').value = editing?.model || ''; $('m-wire').value = editing?.wire_api || (curApp === 'zcode' && isCodex ? zcodeWire : 'responses');
   $('m-dropimg').checked = !!editing?.drop_images; $('m-models').value = (editing?.models || []).join(', ');
-  for (const slot of ['opus', 'sonnet', 'haiku']) $('m-slot-' + slot).value = editing?.slots?.[slot] || '';
+  for (const slot of ['opus', 'sonnet', 'fable', 'haiku', 'subagent']) $('m-slot-' + slot).value = editing?.slots?.[slot] || '';
   $('m-note').value = editing?.note || ''; $('m-enabled').checked = editing ? !!editing.enabled : true;
   showDialog('mask', 'm-name');
 }
@@ -590,7 +590,7 @@ async function saveProvider() {
   if (!$('provider-form').reportValidity()) return;
   const body = { app: editingGroup, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(), api_key: $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
   if (editingGroup === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; body.drop_images = $('m-dropimg').checked; }
-  else { body.models = $('m-models').value; body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), haiku: $('m-slot-haiku').value.trim() }; }
+  else { body.models = $('m-models').value; body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), fable: $('m-slot-fable').value.trim(), haiku: $('m-slot-haiku').value.trim(), subagent: $('m-slot-subagent').value.trim() }; }
   if (!body.name || !body.base_url) return toast('名称与 Base URL 必填', 'err');
   if (editingGroup === 'codex' && !body.model) return toast('OpenAI 渠道必须填模型名', 'err');
   try { const url = new URL(body.base_url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); } catch { $('m-base').focus(); return toast('请输入合法的 http(s) Base URL', 'err'); }
@@ -664,7 +664,7 @@ async function testProvider(id) {
 // ---------------- 子代理槽位 ----------------
 // 槽位 = 别名(mixr-…)→「渠道 @ 模型」。Claude 四个固定槽写进客户端 env;
 // Codex 槽名自拟,客户端用 codex -m mixr-<槽名> 选用。别名请求优先于一切路由规则。
-const SLOT_LABELS = { main: '主模型 main', opus: 'Opus 槽', sonnet: 'Sonnet 槽', haiku: 'Haiku 槽' };
+const SLOT_LABELS = { main: '主模型 main', opus: 'Opus 槽', sonnet: 'Sonnet 槽', fable: 'Fable 槽', haiku: 'Haiku 槽', subagent: 'Subagent 槽' };
 const slotsOf = () => state?.slots || { claude: [], codex: [] };
 function slotChannelOptions(sel, group) {
   return '<option value="">(未配置)</option>' + providers(group).map(p =>

@@ -33,7 +33,7 @@ const { switchClaude, switchCodex, liveState } = require('../mixrouter.js');
 
 const CLAUDE_CHANNEL = {
   id: 'p1', name: '测试-渠道"引号"\\反斜杠', base_url: 'http://127.0.0.1:8787', api_key: 'sk-test-claude',
-  models: ['claude-opus-5'], slots: { opus: 'slot-opus', sonnet: '', haiku: '' },
+  models: ['claude-opus-5'], slots: { opus: 'slot-opus', sonnet: '', fable: 'slot-fable[1M]', haiku: '', subagent: 'slot-subagent' },
 };
 const CODEX_CHANNEL = {
   id: 'c1', name: '测试 Codex', base_url: 'http://127.0.0.1:9/', api_key: 'sk-test-codex', model: 'gpt-5-codex', wire_api: 'responses',
@@ -57,6 +57,18 @@ test('switchClaude 槽位模型只写非空槽,空槽保留现状', () => {
   const cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'));
   assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'slot-opus');
   assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_SONNET_MODEL, undefined);
+  assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_FABLE_MODEL, 'slot-fable[1M]');
+  assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined);
+  assert.strictEqual(cfg.env.CLAUDE_CODE_SUBAGENT_MODEL, 'slot-subagent');
+});
+
+test('渠道 CRUD:slots 过 normalizeChannelSlots,fable/subagent 落库', async () => {
+  const { normalizeChannelSlots } = require('../mixrouter.js');
+  const norm = normalizeChannelSlots({ opus: ' a ', sonnet: null, fable: 'f[1M]', extra: 'x' });
+  assert.deepStrictEqual(Object.keys(norm), ['opus', 'sonnet', 'fable', 'haiku', 'subagent']);
+  assert.strictEqual(norm.opus, 'a');
+  assert.strictEqual(norm.fable, 'f[1M]');
+  assert.strictEqual(norm.subagent, '');
 });
 
 test('switchCodex 全新文件:写顶层 model/model_provider 与 mixr-* section', () => {

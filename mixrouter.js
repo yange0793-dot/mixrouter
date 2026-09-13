@@ -22,7 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 
-const VERSION = '3.2.2';
+const VERSION = '3.2.3';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -122,14 +122,22 @@ const saveRoutes = () => saveJson(ROUTES_FILE, routes);
 //   Codex 组槽名自拟(如 worker/reviewer),codex exec -m mixr-<槽名> 即可选用。
 // 请求模型名精确等于别名时按槽位分发,优先于一切路由规则;槽位目标不受会话粘性影响
 // (粘性只在同一条规则的池内生效),渠道停用会给出明确的 provider_disabled_error。
-const CLAUDE_SLOTS = ['main', 'opus', 'sonnet', 'haiku'];
+const CLAUDE_SLOTS = ['main', 'opus', 'sonnet', 'fable', 'haiku', 'subagent'];
 const CLAUDE_SLOT_ENV = {
   main: 'ANTHROPIC_MODEL',
   opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
   sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  fable: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
   haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  subagent: 'CLAUDE_CODE_SUBAGENT_MODEL',
 };
 const slotAlias = (app, name) => 'mixr-' + name;
+// 渠道级模型映射(cc-switch 同款):直连「切换」时写入对应 env,值可带 [1M] 能力声明
+const CLAUDE_SLOT_KEYS = ['opus', 'sonnet', 'fable', 'haiku', 'subagent'];
+const normalizeChannelSlots = slots => {
+  const src = (slots && typeof slots === 'object') ? slots : {};
+  return Object.fromEntries(CLAUDE_SLOT_KEYS.map(k => [k, String(src[k] || '').trim()]));
+};
 const CODEX_SLOT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
 
 function loadSlots() {
@@ -1220,7 +1228,9 @@ function switchClaude(p) {
   if (p.slots) {
     if (p.slots.opus) cfg.env.ANTHROPIC_DEFAULT_OPUS_MODEL = p.slots.opus;
     if (p.slots.sonnet) cfg.env.ANTHROPIC_DEFAULT_SONNET_MODEL = p.slots.sonnet;
+    if (p.slots.fable) cfg.env.ANTHROPIC_DEFAULT_FABLE_MODEL = p.slots.fable;
     if (p.slots.haiku) cfg.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = p.slots.haiku;
+    if (p.slots.subagent) cfg.env.CLAUDE_CODE_SUBAGENT_MODEL = p.slots.subagent;
   }
   fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(cfg, null, 2) + '\n');
   try { fs.chmodSync(CLAUDE_SETTINGS, 0o600); } catch {}
@@ -1556,7 +1566,7 @@ function apiHandler(req, res) {
         note: String(b.note || ''), created_at: new Date().toISOString() };
       if (app === 'claude') {
         prov.models = Array.isArray(b.models) ? b.models : String(b.models || '').split(',').map(s => s.trim()).filter(Boolean);
-        prov.slots = { opus: String(b.slots?.opus || ''), sonnet: String(b.slots?.sonnet || ''), haiku: String(b.slots?.haiku || '') };
+        prov.slots = normalizeChannelSlots(b.slots);
         prov.ua = String(b.ua || '');
       } else {
         prov.model = String(b.model || '');
@@ -1587,7 +1597,7 @@ function apiHandler(req, res) {
         if (b.note !== undefined) prov.note = String(b.note);
         if (providerApp(prov.id) === 'claude') {
           if (b.models !== undefined) prov.models = Array.isArray(b.models) ? b.models : String(b.models).split(',').map(s => s.trim()).filter(Boolean);
-          if (b.slots !== undefined) prov.slots = { opus: String(b.slots.opus || ''), sonnet: String(b.slots.sonnet || ''), haiku: String(b.slots.haiku || '') };
+          if (b.slots !== undefined) prov.slots = normalizeChannelSlots(b.slots);
           if (b.ua !== undefined) prov.ua = String(b.ua);
         } else {
           if (b.model !== undefined) prov.model = String(b.model);
@@ -1784,6 +1794,7 @@ module.exports = {
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
   // v3.2 子代理槽位
   slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
+  normalizeChannelSlots, CLAUDE_SLOT_KEYS,
   // v3.2 渠道池主备策略
   pickMember, markCooldown, inCooldown,
   ROUTER_ID, ROUTER_URL, ROUTER_TOKEN, ROUTER_SECTION,
