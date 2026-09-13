@@ -6,501 +6,652 @@
 <title>Mixrouter 控制台</title>
 <style>
   :root {
-    --bg: #131417; --sidebar: #1a1c20; --card: #1e2127; --card2: #22252c;
-    --border: #2b2f37; --text: #e6e8ec; --dim: #8b909a; --accent: #4f8cff;
-    --ok: #3ecf8e; --warn: #f5a623; --err: #ff6b6b; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+    --bg: #101416; --sidebar: #141a1d; --card: #192125; --card2: #202b30;
+    --border: #2d3a40; --text: #edf3f3; --dim: #a0b0b6; --accent: #5dd6bc;
+    --ok: #70d5ae; --warn: #ebc17b; --err: #ff9999;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; display: flex; min-height: 100vh; }
-
-  /* ---------- 侧栏 ---------- */
-  .sidebar { width: 210px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
-  .logo { padding: 18px 16px 14px; font-size: 17px; font-weight: 700; letter-spacing: .3px; }
-  .logo .swap { display: inline-block; color: var(--accent); margin-right: 8px; }
-  .logo small { display: block; font-size: 11px; font-weight: 400; color: var(--dim); margin-top: 2px; }
-  nav { padding: 6px 8px; }
-  nav a { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; color: var(--dim); text-decoration: none; cursor: pointer; margin-bottom: 2px; }
-  nav a:hover { background: var(--card2); color: var(--text); }
-  nav a.active { background: var(--card2); color: var(--text); }
-  nav a.active .ic { color: var(--accent); }
-  .ic { width: 17px; text-align: center; }
-  .status { margin-top: auto; padding: 14px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
-  .status .run { display: flex; align-items: center; gap: 7px; color: var(--ok); font-weight: 600; margin-bottom: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
-  .status .row { display: flex; justify-content: space-between; margin-top: 3px; }
-  .status .row b { color: var(--text); font-weight: 500; }
-
-  /* ---------- 主区 ---------- */
-  main { flex: 1; padding: 22px 26px 40px; max-width: 1200px; }
-  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .head h1 { font-size: 19px; font-weight: 700; }
-  .head .sub { color: var(--dim); font-size: 12px; margin-top: 3px; }
-  button { font: inherit; cursor: pointer; border: 1px solid var(--border); background: var(--card2); color: var(--text); border-radius: 8px; padding: 6px 14px; }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button.primary:hover { opacity: .9; }
-  button.danger:hover { border-color: var(--err); color: var(--err); }
-  button.small { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
-  button.small.cur { border-color: var(--ok); color: var(--ok); }
-
-  /* ---------- 应用切换(仿 cc-switch) ---------- */
-  .apptabs { display: inline-flex; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 3px; margin-bottom: 16px; }
-  .apptabs button { border: none; background: transparent; border-radius: 8px; padding: 7px 18px; font-weight: 600; color: var(--dim); display: flex; align-items: center; gap: 8px; }
-  .apptabs button:hover { color: var(--text); }
-  .apptabs button.active { background: var(--card2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
-  .apptabs .appdot { width: 9px; height: 9px; border-radius: 3px; }
-  .liveinfo { font-size: 12px; color: var(--dim); margin-bottom: 14px; }
-  .liveinfo b { color: var(--text); font-weight: 500; }
-  .liveinfo .warn { color: var(--warn); }
-
-  /* ---------- 渠道卡片 ---------- */
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 15px 16px 12px; display: flex; flex-direction: column; gap: 8px; transition: box-shadow .15s, border-color .15s, opacity .15s; }
-  .card:not(.cur):hover { border-color: #3a4050; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
-  .card.off { opacity: .55; }
-  .card.cur { border-color: rgba(62,207,142,.65); box-shadow: 0 0 0 1px rgba(62,207,142,.45) inset, 0 2px 14px rgba(62,207,142,.1); }
-  .card .top { display: flex; align-items: center; gap: 9px; }
-  .cdot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
-  .card .name { font-weight: 650; font-size: 15px; }
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 6px; font-weight: 600; border: none; }
-  .badge.on { background: rgba(62,207,142,.16); color: var(--ok); }
-  .badge.off { background: rgba(139,144,154,.16); color: var(--dim); }
-  .badge.drift { background: rgba(245,166,35,.16); color: var(--warn); }
-  .badge.info { background: rgba(79,140,255,.16); color: var(--accent); }
-  .banner { display: none; align-items: flex-start; gap: 10px; border: 1px solid rgba(245,166,35,.3); background: rgba(245,166,35,.08); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13px; color: var(--warn); line-height: 1.6; }
-  .banner.show { display: flex; }
-  .banner .ic { flex-shrink: 0; }
-  .mono { font-family: var(--mono); font-size: 12px; color: var(--dim); word-break: break-all; }
-  .tags { display: flex; flex-wrap: wrap; gap: 5px; }
-  .tag { font-family: var(--mono); font-size: 11px; background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; color: #b8bdc7; }
-  .note { font-size: 12px; color: var(--warn); }
-  .testline { font-size: 12px; min-height: 16px; }
-  .testline.ok { color: var(--ok); } .testline.err { color: var(--err); } .testline.wait { color: var(--dim); }
-  .card .foot { display: flex; gap: 7px; margin-top: auto; padding-top: 8px; }
-  .empty { text-align: center; color: var(--dim); padding: 46px 0; border: 1px dashed var(--border); border-radius: 12px; background: rgba(255,255,255,.012); margin-top: 4px; }
-  .empty b { display: block; font-size: 15px; color: var(--text); margin-bottom: 8px; }
-
-  /* ---------- 路由 ---------- */
-  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
-  .panel h2 { font-size: 15px; margin-bottom: 4px; }
-  .panel .hint { color: var(--dim); font-size: 12px; margin-bottom: 14px; }
-  .rule { display: grid; grid-template-columns: 1fr 220px 1fr 60px 30px; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border); }
-  .rule.head-row { border-top: none; color: var(--dim); font-size: 12px; padding-bottom: 2px; }
-  input[type=text], input[type=password], input[type=number], select {
-    width: 100%; background: var(--card2); border: 1px solid var(--border); color: var(--text);
-    border-radius: 7px; padding: 7px 10px; font: inherit; font-size: 13px;
+  [hidden] { display: none !important; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; display: flex; min-height: 100vh; }
+  button, input, select { font: inherit; }
+  button, a, input, select { -webkit-tap-highlight-color: transparent; }
+  button { cursor: pointer; border: 1px solid var(--border); background: var(--card2); color: var(--text); border-radius: 8px; padding: 9px 14px; min-height: 40px; line-height: 1.4; }
+  button:hover:not(:disabled) { background: #2a393f; border-color: #577078; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #092b24; font-weight: 650; }
+  button.primary:hover:not(:disabled) { background: #7ae5ce; border-color: #7ae5ce; }
+  button.danger:hover:not(:disabled) { border-color: var(--err); color: var(--err); }
+  button.small { padding: 7px 10px; font-size: 12px; min-height: 34px; }
+  button.small.cur { color: var(--accent); border-color: #427567; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  input:focus-visible, select:focus-visible { border-color: var(--accent); }
+  input[type=text], input[type=password], input[type=number], input[type=search], select {
+    width: 100%; min-width: 0; color: var(--text); background: #111a1e; border: 1px solid var(--border); border-radius: 7px; padding: 9px 11px;
   }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
-  .rule input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
-  .iconbtn { background: none; border: none; color: var(--dim); font-size: 17px; padding: 2px 6px; }
+  input::placeholder { color: #81969e; opacity: 1; }
+  input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; flex-shrink: 0; }
+  label { color: var(--dim); font-size: 12px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .skip-link { position: fixed; left: 20px; top: -80px; z-index: 100; background: var(--accent); color: #092b24; padding: 12px; border-radius: 8px; }
+  .skip-link:focus { top: 12px; }
+  .sidebar { width: 224px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; height: 100dvh; }
+  .logo { display: flex; align-items: center; gap: 11px; padding: 28px 22px; font-size: 18px; font-weight: 700; letter-spacing: -.4px; }
+  .logo .swap { display: grid; place-items: center; width: 34px; height: 34px; background: #203a34; border: 1px solid #34584d; border-radius: 9px; color: var(--accent); font-size: 22px; }
+  .logo small { display: block; font-size: 10px; letter-spacing: 1.8px; font-weight: 500; color: var(--dim); }
+  .nav-label { color: #81969e; font-size: 10px; letter-spacing: 1.6px; padding: 12px 24px 9px; }
+  nav { padding: 0 12px; }
+  nav a { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border: 1px solid transparent; border-radius: 8px; color: var(--dim); text-decoration: none; margin-bottom: 5px; }
+  nav a:hover { color: var(--text); background: var(--card2); }
+  nav a.active { background: #21342f; border-color: #314f45; color: #a0edd7; }
+  .ic { width: 18px; text-align: center; font-size: 17px; flex-shrink: 0; }
+  .nav-caption { margin-left: auto; font: 10px var(--mono); opacity: .7; }
+  .status { margin: auto 16px 18px; padding: 16px 8px 0; border-top: 1px solid var(--border); font-size: 11px; color: var(--dim); }
+  .status .run { display: flex; align-items: center; gap: 8px; color: var(--dim); font-weight: 600; margin-bottom: 12px; font-size: 12px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+  body[data-connection=online] .run { color: var(--ok); }
+  body[data-connection=offline] .run { color: var(--err); }
+  .status .row { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; }
+  .status .row b { color: var(--text); font-family: var(--mono); font-weight: 400; }
+  .workspace { flex: 1; min-width: 0; }
+  .topbar { min-height: 72px; display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 16px 36px; border-bottom: 1px solid var(--border); }
+  .breadcrumb { display: flex; align-items: center; gap: 12px; color: var(--dim); font-size: 12px; }
+  .breadcrumb strong { color: var(--text); font-weight: 500; }
+  .top-meta { display: flex; align-items: center; gap: 10px; color: var(--dim); font: 11px var(--mono); }
+  .local-tag { border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px; }
+  main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 22px 36px 48px; min-width: 0; }
+  section { min-width: 0; }
+  .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+  .head > div { min-width: 0; }
+  .eyebrow { font: 10px var(--mono); letter-spacing: 1.6px; color: var(--accent); margin-bottom: 7px; }
+  .head h1 { font-size: 26px; line-height: 1.3; font-weight: 650; letter-spacing: -.7px; }
+  .head .sub { color: var(--dim); font-size: 12px; margin-top: 8px; max-width: 720px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
+  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .metric { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 11px 18px; min-width: 0; }
+  .metric-label { font-size: 12px; color: var(--dim); }
+  .metric b { display: block; font: 500 27px/1.4 var(--mono); margin: 3px 0 1px; letter-spacing: -1px; }
+  .metric small { font-size: 11px; color: var(--dim); }
+  .section-label { font-size: 10px; letter-spacing: 1.4px; color: var(--dim); margin-bottom: 6px; }
+  .apptabs { display: inline-flex; max-width: 100%; background: #131c20; border: 1px solid var(--border); border-radius: 10px; padding: 4px; gap: 4px; margin-bottom: 12px; }
+  .apptabs button { border: 1px solid transparent; background: transparent; padding: 9px 16px; font-size: 13px; color: var(--dim); display: flex; align-items: center; justify-content: center; gap: 9px; }
+  .apptabs button.active { background: var(--card2); color: var(--text); border-color: #40545c; }
+  .appdot { width: 7px; height: 7px; border-radius: 2px; background: var(--accent); }
+  .count { font: 11px var(--mono); color: var(--dim); background: #10191d; border-radius: 4px; padding: 2px 5px; }
+  .protocol-panel { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: #151f22; margin-bottom: 16px; }
+  .protocol-panel label { flex-shrink: 0; }
+  .protocol-panel select { display: block; margin-top: 5px; width: 220px; }
+  .protocol-panel p, .integration-note { font-size: 12px; color: var(--dim); line-height: 1.8; }
+  .integration-note { margin-top: 6px; }
+  .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .mode-card { padding: 11px 16px; background: #151d21; border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
+  .mode-card.selected { border-color: #427567; background: #192c27; }
+  .mode-card .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 3px; }
+  .mode-card h2 { font-size: 13px; font-weight: 600; }
+  .mode-card p { font-size: 12px; color: var(--dim); margin-top: 2px; overflow-wrap: anywhere; }
+  .liveinfo { margin-bottom: 12px; }
+  .config-line { margin-top: 6px; color: var(--dim); font-size: 11px; overflow-wrap: anywhere; }
+  .banner { display: none; align-items: flex-start; gap: 10px; border: 1px solid #6b5635; background: #2b251b; border-radius: 9px; padding: 12px 15px; margin-bottom: 18px; font-size: 12px; color: var(--warn); overflow-wrap: anywhere; }
+  .banner.show { display: flex; }
+  .banner.offline { border-color: #674040; background: #2a1d20; color: var(--err); }
+  .banner button { margin-left: auto; flex-shrink: 0; }
+  .channel-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 16px 0 12px; }
+  .channel-toolbar h2 { font-size: 15px; font-weight: 600; }
+  .channel-toolbar p { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .filters { display: flex; gap: 10px; }
+  .filters label { display: block; }
+  .filters input { width: 240px; margin-top: 4px; }
+  .filters select { width: 122px; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr)); gap: 16px; }
+  .card { min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 11px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .card:hover { border-color: #4c626b; }
+  .card.off { background: #151c20; }
+  .card.cur { border-color: #427567; }
+  .card .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .cdot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); flex-shrink: 0; }
+  .card .name { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; margin-right: auto; }
+  .badge { font-size: 10px; padding: 3px 7px; border-radius: 5px; font-weight: 500; white-space: nowrap; }
+  .badge.on { background: #254438; color: #a1e8c5; }
+  .badge.off { background: #2b363c; color: #b3c0c6; }
+  .badge.drift { background: #443820; color: var(--warn); }
+  .badge.info { background: #233e3d; color: #98dfd2; }
+  .mono { font-family: var(--mono); font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
+  .endpoint { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag { max-width: 100%; overflow-wrap: anywhere; font: 11px/1.6 var(--mono); background: #202c31; border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px; color: #b9ccd1; }
+  .note { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+  .testline { font-size: 11px; overflow-wrap: anywhere; }
+  .testline.ok { color: var(--ok); } .testline.err { color: var(--err); } .testline.wait { color: var(--dim); }
+  .card .foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--border); }
+  .empty { text-align: center; color: var(--dim); padding: 40px 24px; border: 1px dashed #405159; border-radius: 11px; background: #141c20; font-size: 12px; }
+  .empty b { display: block; font-size: 16px; color: var(--text); margin-bottom: 8px; font-weight: 600; }
+  .empty button { display: block; margin: 18px auto 0; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 11px; padding: 22px; margin-bottom: 18px; }
+  .panel h2 { font-size: 15px; margin-bottom: 7px; font-weight: 600; }
+  .panel .hint { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+  .savebar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
+  .savebar .msg { font-size: 12px; color: var(--dim); }
+  .rulecard { border: 1px solid var(--border); border-radius: 9px; padding: 16px; margin-bottom: 12px; background: #151e22; }
+  .rc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .rc-idx { font: 11px var(--mono); color: var(--accent); background: #243c36; border-radius: 5px; padding: 5px 8px; }
+  .rc-head > .field { flex: 1; min-width: 180px; }
+  .field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; min-width: 0; }
+  .rc-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+  .rc-mini input[type=number] { width: 64px; }
+  .rc-mini select { width: auto; max-width: 170px; }
+  .rc-body { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); display: grid; gap: 12px; }
+  .rc-line { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+  .rc-tag { font-size: 11px; color: var(--dim); width: 32px; align-self: center; }
+  .rc-line > .field { flex: 1; min-width: 150px; }
+  .poolbox { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+  .poolitem { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font-size: 12px; flex-wrap: wrap; }
+  .poolitem.on { border-color: #427567; background: #203831; }
+  .poolitem label { display: flex; align-items: center; gap: 6px; }
+  .poolitem .w { width: 64px; padding: 5px 7px; }
+  .pool-hint { font-size: 11px; color: var(--dim); }
+  .iconbtn { color: var(--dim); padding: 6px 10px; }
   .iconbtn:hover { color: var(--err); }
-  .savebar { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
-  .savebar .msg { font-size: 12px; color: var(--ok); }
-
-  /* ---------- 规则卡(v3:目标可选单渠道/渠道池 + 匹配条件) ---------- */
-  .rulecard { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: rgba(255,255,255,.012); }
-  .rc-head { display: flex; align-items: center; gap: 10px; }
-  .rc-idx { font-family: var(--mono); font-size: 11px; color: var(--dim); background: var(--card2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; flex-shrink: 0; }
-  .rc-head input[type=text] { flex: 1; }
-  .rc-mini { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); white-space: nowrap; flex-shrink: 0; }
-  .rc-mini input[type=number] { width: 62px; }
-  .rc-mini input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
-  .rc-body { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: grid; gap: 9px; }
-  .rc-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-  .rc-line > .rc-tag { font-size: 12px; color: var(--dim); width: 46px; flex-shrink: 0; }
-  .rc-line select { width: auto; min-width: 132px; }
-  .rc-line input[type=text] { width: auto; min-width: 150px; flex: 1; }
-  .poolbox { display: flex; flex-wrap: wrap; gap: 6px; }
-  .poolitem { display: flex; align-items: center; gap: 6px; background: var(--card2); border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; font-size: 12.5px; cursor: pointer; }
-  .poolitem:hover { border-color: #3a4050; }
-  .poolitem.on { border-color: rgba(79,140,255,.6); background: rgba(79,140,255,.1); }
-  .poolitem input { accent-color: var(--accent); }
-  .poolitem .w { width: 62px; background: var(--card); border: 1px solid var(--border); color: var(--text); border-radius: 5px; padding: 2px 6px; font: inherit; font-size: 11px; }
-  .pool-hint { font-size: 11.5px; color: var(--dim); }
-
-  /* ---------- 会话 ---------- */
-  .sess-tag { font-family: var(--mono); font-size: 11px; border-radius: 5px; padding: 1px 6px; background: var(--card2); border: 1px solid var(--border); color: #b8bdc7; }
-  td .pin-sel { width: auto; min-width: 118px; padding: 4px 8px; font-size: 12px; }
-  .cool { color: var(--warn); font-size: 11px; }
-  .lbl { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-  .sess-acts { display: flex; gap: 6px; align-items: center; }
-
-  /* ---------- 日志 ---------- */
-  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
-  th { text-align: left; font-size: 12px; color: var(--dim); font-weight: 500; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--card2); }
-  td { padding: 8px 12px; font-size: 12.5px; border-bottom: 1px solid var(--border); font-family: var(--mono); }
+  .table-wrap { width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px; overscroll-behavior-x: contain; }
+  table { width: 100%; min-width: 980px; border-collapse: collapse; background: var(--card); }
+  th { text-align: left; font-size: 11px; color: var(--dim); font-weight: 500; padding: 13px 14px; background: var(--card2); white-space: nowrap; }
+  td { padding: 13px 14px; font: 11px/1.6 var(--mono); border-top: 1px solid var(--border); max-width: 300px; overflow-wrap: anywhere; }
   td:first-child { font-family: inherit; color: var(--dim); white-space: nowrap; }
   .st2 { color: var(--ok); } .st4, .st5 { color: var(--err); }
-
-  /* ---------- 弹窗 / 提示 ---------- */
-  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: flex-start; justify-content: center; padding-top: 9vh; z-index: 50; }
+  .sess-tag { font: 11px var(--mono); border-radius: 4px; padding: 3px 6px; background: var(--card2); border: 1px solid var(--border); color: #c1d0d5; }
+  td .pin-sel { min-width: 135px; padding: 6px 8px; font-size: 12px; }
+  .cool { color: var(--warn); font-size: 11px; }
+  .lbl { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-acts { display: flex; gap: 6px; }
+  .chips { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+  .chip { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; font-size: 11px; color: var(--dim); min-width: 125px; }
+  .chip b { display: block; font: 500 21px var(--mono); color: var(--text); margin-top: 8px; }
+  .logbar { display: flex; gap: 12px; margin-bottom: 18px; align-items: flex-end; flex-wrap: wrap; }
+  .logbar label { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 130px; }
+  .mask { position: fixed; inset: 0; background: rgba(4,9,12,.78); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 50; }
   .mask.show { display: flex; }
-  .modal { background: var(--sidebar); border: 1px solid var(--border); border-radius: 14px; width: 540px; max-width: 92vw; padding: 22px 24px; max-height: 84vh; overflow-y: auto; }
-  .modal h3 { margin-bottom: 16px; font-size: 16px; }
-  .modal label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 5px; }
-  .modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
-  .modal .chk { display: flex; align-items: center; gap: 8px; margin-top: 16px; font-size: 13px; }
-  .modal .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  #toast { position: fixed; right: 22px; top: 20px; background: rgba(34,37,44,.94); backdrop-filter: blur(8px); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 11px; padding: 11px 16px; font-size: 13px; display: none; z-index: 99; max-width: 380px; box-shadow: 0 6px 24px rgba(0,0,0,.35); animation: toastin .18s ease; }
-  #toast.ok { border-left-color: var(--ok); } #toast.err { border-left-color: var(--err); }
-  @keyframes toastin { from { transform: translateX(14px); opacity: 0; } }
-
-  /* ---------- 日志筛选与统计 ---------- */
-  .chips { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
-  .chip { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 9px 14px; font-size: 12px; color: var(--dim); min-width: 86px; }
-  .chip b { display: block; font-size: 16px; color: var(--text); font-weight: 650; margin-top: 2px; font-family: var(--mono); }
-  .logbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-  .logbar label { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
-  .logbar input[type=text], .logbar select { width: auto; min-width: 150px; }
+  .modal { background: var(--sidebar); border: 1px solid #40545c; border-radius: 14px; width: 560px; max-width: 100%; padding: 26px; max-height: 90vh; max-height: 90dvh; overflow-y: auto; box-shadow: 0 24px 80px #0008; }
+  .modal h3 { font-size: 19px; font-weight: 600; }
+  .modal .description { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .modal label { display: block; margin: 14px 0 6px; }
+  .modal .foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .modal .chk { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+  .modal .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .modal fieldset { border: 0; margin-top: 16px; }
+  .modal legend { font-size: 12px; color: var(--dim); }
+  #confirm-text { white-space: pre-line; overflow-wrap: anywhere; color: var(--dim); font-size: 13px; margin-top: 16px; }
+  #toast { position: fixed; right: 24px; bottom: 24px; background: #233137; border: 1px solid #47606a; border-left: 3px solid var(--accent); border-radius: 9px; padding: 14px 18px; font-size: 12px; display: none; z-index: 99; max-width: min(450px, calc(100vw - 32px)); box-shadow: 0 10px 32px #0005; overflow-wrap: anywhere; }
+  #toast.err { border-left-color: var(--err); }
+  body[data-connection=offline] .mode-card.selected { border-color: var(--border); background: #151d21; }
+  body[data-connection=offline] .badge.on { color: #b3c0c6; background: #2b363c; }
+  body[data-connection=offline] .card.cur { border-color: var(--border); }
+  @media (min-width: 1500px) { main { padding-top: 28px; } .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @media (max-width: 1150px) {
+    .sidebar { width: 196px; } .logo { padding: 26px 17px; }
+    main { padding: 22px 24px 40px; } .topbar { padding: 16px 24px; }
+    .head { flex-wrap: wrap; gap: 16px; } .channel-toolbar { align-items: flex-start; flex-direction: column; }
+    .filters { width: 100%; } .filters label:first-child { flex: 1; } .filters input { width: 100%; }
+    .metric { padding: 11px 14px; } .metric b { font-size: 23px; }
+  }
+  @media (max-width: 760px) {
+    body { display: block; }
+    .sidebar { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+    .logo { padding: 16px 20px 12px; font-size: 17px; } .logo small { font-size: 9px; }
+    .nav-label, .nav-caption { display: none; }
+    nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 0 16px 12px; }
+    nav a { justify-content: center; gap: 7px; padding: 10px 4px; margin: 0; font-size: 12px; }
+    .status { position: absolute; top: 22px; right: 20px; padding: 0; margin: 0; border: 0; }
+    .status .row { display: none; } .status .run { font-size: 11px; }
+    .topbar { min-height: 50px; padding: 12px 20px; } .top-meta { font-size: 10px; } .local-tag { display: none; }
+    main { padding: 24px 20px 36px; } .head h1 { font-size: 24px; }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 24px; }
+    .metric b { font-size: 25px; } .metric small { font-size: 10px; }
+    .apptabs { width: 100%; display: flex; gap: 2px; }
+    .apptabs button { flex: 1; padding: 9px 7px; gap: 6px; font-size: 12px; white-space: nowrap; }
+    .appdot { display: none; }
+    .protocol-panel { align-items: stretch; flex-direction: column; gap: 10px; } .protocol-panel select { width: 100%; }
+    .mode-grid { grid-template-columns: 1fr; }
+    .panel { padding: 16px; } .rulecard { padding: 13px; }
+    .rc-head > .field { min-width: 200px; } .rc-line > .field { min-width: 100%; }
+    .banner { flex-wrap: wrap; } .banner button { margin-left: 0; }
+    .actions { max-width: 100%; } .filters select { width: 110px; }
+    .modal { padding: 22px 18px; } .mask { padding: 16px; }
+    .modal .grid2 { grid-template-columns: 1fr; }
+    .logbar label { min-width: calc(50% - 12px); } .logbar button { min-height: 40px; }
+    .card .foot button { min-height: 40px; }
+    #toast { right: 16px; bottom: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 </style>
 </head>
-<body>
-  <div class="sidebar">
-    <div class="logo"><span class="swap">⇄</span>Mixrouter<small>本地模型路由 · v<span id="ver">-</span></small></div>
-    <nav>
-      <a data-view="providers" class="active"><span class="ic">▤</span>渠道</a>
-      <a data-view="routes"><span class="ic">⑃</span>路由</a>
-      <a data-view="sessions"><span class="ic">◈</span>会话</a>
-      <a data-view="logs"><span class="ic">≣</span>请求日志</a>
+<body data-connection="connecting">
+  <a class="skip-link" href="#main">跳至主要内容</a>
+  <aside class="sidebar" id="sidebar" aria-label="控制台侧栏">
+    <div class="logo"><span class="swap" aria-hidden="true">⇄</span><div>Mixrouter<small>LOCAL AI GATEWAY</small></div></div>
+    <div class="nav-label">WORKSPACE</div>
+    <nav aria-label="主导航">
+      <a href="#providers" data-view="providers" class="active" aria-current="page"><span class="ic" aria-hidden="true">▤</span>渠道<span class="nav-caption">01</span></a>
+      <a href="#routes" data-view="routes"><span class="ic" aria-hidden="true">⑃</span>路由<span class="nav-caption">02</span></a>
+      <a href="#sessions" data-view="sessions"><span class="ic" aria-hidden="true">◈</span>会话<span class="nav-caption">03</span></a>
+      <a href="#logs" data-view="logs"><span class="ic" aria-hidden="true">≣</span>请求日志<span class="nav-caption">04</span></a>
     </nav>
     <div class="status">
-      <div class="run"><span class="dot"></span>运行中</div>
-      <div class="row"><span>代理端口</span><b id="st-proxy">-</b></div>
-      <div class="row"><span>控制台端口</span><b id="st-ui">-</b></div>
-      <div class="row"><span>运行时长</span><b id="st-up">-</b></div>
-      <div class="row"><span>今日请求</span><b id="st-req">-</b></div>
-      <div class="row"><span>今日 tokens</span><b id="st-tok">-</b></div>
+      <div class="run" role="status"><span class="dot" aria-hidden="true"></span><span id="connection-label">正在连接</span></div>
+      <div class="row"><span>代理端口</span><b id="st-proxy">—</b></div>
+      <div class="row"><span>控制台端口</span><b id="st-ui">—</b></div>
+      <div class="row"><span>运行时长</span><b id="st-up">—</b></div>
+      <div class="row"><span>今日请求</span><b id="st-req">—</b></div>
+      <div class="row"><span>tokens 入 / 出</span><b id="st-tok">—</b></div>
     </div>
+  </aside>
+
+  <div class="workspace" id="workspace">
+    <header class="topbar">
+      <div class="breadcrumb" aria-label="当前位置"><span>工作区</span><span aria-hidden="true">/</span><strong id="breadcrumb-view">渠道</strong></div>
+      <div class="top-meta"><span class="local-tag">LOCAL</span><span>v<span id="ver">—</span></span><button class="small" id="refresh-btn" onclick="refresh()" aria-label="刷新控制台状态">刷新</button></div>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="banner offline" id="connection-banner" role="status"><span id="connection-message"></span><button class="small" onclick="refresh()">重新连接</button></div>
+      <section id="view-providers" aria-labelledby="providers-title">
+        <div class="head">
+          <div><div class="eyebrow">PROVIDERS / INTEGRATIONS</div><h1 id="providers-title">渠道管理</h1><div class="sub">管理上游与客户端接入。从直连到会话路由，在一个工作区中配置。</div></div>
+          <div class="actions"><button id="btn-router" onclick="switchRouterMode()" disabled>路由模式</button><button class="primary" id="new-provider" onclick="openProvider()" disabled>＋ 新建渠道</button></div>
+        </div>
+        <div class="metrics" aria-label="工作区概览">
+          <div class="metric"><span class="metric-label">可用渠道配置</span><b id="metric-providers">—</b><small id="metric-providers-hint">等待状态 · 非连通性检测</small></div>
+          <div class="metric"><span class="metric-label">今日请求</span><b id="metric-requests">—</b><small>来自代理真实请求统计</small></div>
+          <div class="metric"><span class="metric-label">今日 tokens</span><b id="metric-tokens">—</b><small id="metric-tokens-hint">输入 / 输出合计</small></div>
+          <div class="metric"><span class="metric-label">会话绑定</span><b id="metric-sessions">—</b><small id="metric-sessions-hint">按协议组识别，不按客户端</small></div>
+        </div>
+        <div class="section-label">AGENT CLIENT</div>
+        <div class="apptabs" role="tablist" aria-label="Agent 客户端">
+          <button role="tab" aria-selected="true" aria-controls="agent-panel" id="tab-claude" class="active" onclick="setApp('claude')"><span class="appdot" aria-hidden="true"></span>Claude Code<span class="count" id="count-claude">—</span></button>
+          <button role="tab" aria-selected="false" aria-controls="agent-panel" tabindex="-1" id="tab-codex" onclick="setApp('codex')"><span class="appdot" aria-hidden="true"></span>Codex<span class="count" id="count-codex">—</span></button>
+          <button role="tab" aria-selected="false" aria-controls="agent-panel" tabindex="-1" id="tab-zcode" onclick="setApp('zcode')"><span class="appdot" aria-hidden="true"></span>ZCode<span class="count" id="count-zcode">—</span></button>
+        </div>
+        <div id="agent-panel" role="tabpanel" aria-labelledby="tab-claude">
+          <div class="protocol-panel" id="zcode-protocol" hidden>
+            <label for="zcode-wire">ZCode 接入协议<select id="zcode-wire" onchange="setZcodeWire(this.value)"><option value="anthropic">Anthropic · Messages</option><option value="responses">OpenAI · Responses</option><option value="chat">OpenAI · Chat Completions</option></select></label>
+            <p id="zcode-group-hint"></p>
+          </div>
+          <div class="liveinfo" id="liveinfo"><div class="empty"><b>正在读取客户端配置</b>连接本地控制台后展示实际配置，不代表上游连通性。</div></div>
+          <div class="banner" id="drift-banner" role="status"><span id="drift-text"></span></div>
+          <div class="channel-toolbar">
+            <div><h2 id="channel-heading">渠道库</h2><p id="channel-count" aria-live="polite">等待状态数据</p></div>
+            <div class="filters"><label for="provider-search">搜索渠道<input type="search" id="provider-search" placeholder="名称、URL 或模型" oninput="renderProviders()"></label><label for="provider-filter">启用状态<select id="provider-filter" onchange="renderProviders()"><option value="all">全部渠道</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label></div>
+          </div>
+          <div class="grid" id="prov-grid"></div>
+          <div class="empty" id="prov-empty" hidden><b id="empty-title">还没有渠道</b><span id="empty-hint"></span><button id="empty-action" class="primary" onclick="openProvider()">新建渠道</button></div>
+        </div>
+      </section>
+
+      <section id="view-routes" style="display:none" aria-labelledby="routes-title">
+        <div class="head"><div><div class="eyebrow">TRAFFIC / RULES</div><h1 id="routes-title">路由规则</h1><div class="sub">按模型名子串匹配，逗号分隔、大小写不敏感。优先级大的先匹配，同优先级按从上到下。</div></div><div class="actions"><button onclick="reloadRoutes()">重新载入</button><button class="primary" id="save-routes" onclick="saveRoutes()" disabled>保存路由</button></div></div>
+        <div class="panel"><h2>匹配与分流</h2><div class="hint">单渠道直达，或使用渠道池按会话分配不同 key；同一对话保持渠道粘性。目标模型留空 = 透传；<code>[1M]</code> 后缀会剥离并附加 context-1m beta 头。<br>仅有 Claude / Anthropic 与 Codex / OpenAI 两个协议组；ZCode 流量按所选协议归组，不单独识别 ZCode 会话。</div>
+          <div id="rules-box"><div class="empty"><b>等待路由配置</b>连接后即可编辑，自动刷新不会覆盖编辑草稿。</div></div>
+          <div class="savebar"><button id="add-rule" onclick="addRule()" disabled>＋ 添加规则</button><span class="msg" id="save-msg" role="status">自动刷新不会覆盖编辑草稿</span></div>
+        </div>
+        <div class="panel"><h2>默认路由</h2><div class="hint">所有规则都未命中时使用，也可配置为渠道池。未绑定渠道时请求返回 503。</div><div id="def-box"></div></div>
+      </section>
+
+      <section id="view-sessions" style="display:none" aria-labelledby="sessions-title">
+        <div class="head"><div><div class="eyebrow">TRAFFIC / SESSIONS</div><h1 id="sessions-title">会话绑定</h1><div class="sub">每个对话锁定一个渠道；改绑立即对该对话生效，不影响其他对话。ZCode 流量归入所选协议组，这里不识别独立的 ZCode 会话。</div></div><div class="actions"><label for="f-sess-app" class="sr-only">会话协议组</label><select id="f-sess-app" onchange="sessApp=this.value;renderSessions()" style="width:auto"><option value="">全部协议组</option><option value="claude">Claude / Anthropic</option><option value="codex">Codex / OpenAI</option></select><button class="danger" onclick="clearSessions()">清空全部绑定</button></div></div>
+        <div class="chips" id="sess-chips"></div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="会话绑定表，可横向滚动"><table><caption class="sr-only">按协议分组的会话绑定</caption><thead><tr><th scope="col">会话</th><th scope="col">协议组</th><th scope="col">对话</th><th scope="col">渠道（可改）</th><th scope="col">模型</th><th scope="col">命中规则</th><th scope="col">请求</th><th scope="col">tokens 入 / 出</th><th scope="col">最近活跃</th><th scope="col">操作</th></tr></thead><tbody id="sess-body"></tbody></table></div>
+        <div class="empty" id="sess-empty" style="display:none"><b>还没有匹配的会话</b>通过本地路由发起对话后，会话绑定会出现在所属协议组；也可以调整分组筛选。</div>
+      </section>
+
+      <section id="view-logs" style="display:none" aria-labelledby="logs-title">
+        <div class="head"><div><div class="eyebrow">OBSERVABILITY / REQUESTS</div><h1 id="logs-title">请求日志</h1><div class="sub">内存保留最近 500 条，落盘 logs/requests.jsonl（5MB 轮转）；统计为内存窗口全量聚合。ZCode 请求按 Anthropic 或 OpenAI 协议归组。</div></div><label class="rc-mini"><input type="checkbox" id="logs-auto" checked>自动刷新（5 秒）</label></div>
+        <div class="banner" id="logs-error" role="status"></div>
+        <div class="chips" id="stat-chips"></div>
+        <div class="logbar">
+          <label>协议组<select id="f-app"><option value="">全部</option><option value="claude">Claude / Anthropic</option><option value="codex">Codex / OpenAI</option></select></label>
+          <label>渠道<input type="text" id="f-provider" placeholder="渠道名子串"></label><label>模型<input type="text" id="f-model" placeholder="模型名子串"></label><label>会话<input type="text" id="f-session" placeholder="会话短 id"></label>
+          <label>状态<select id="f-status"><option value="">全部</option><option value="ok">仅成功（2xx/3xx）</option><option value="err">仅失败（4xx/5xx/断连）</option></select></label><button class="small" onclick="loadLogs()">应用</button><button class="small" onclick="clearFilters()">清空</button>
+        </div>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="请求日志表，可横向滚动"><table><caption class="sr-only">最近请求日志</caption><thead><tr><th scope="col">时间</th><th scope="col">会话</th><th scope="col">渠道 / 协议组</th><th scope="col">模型 入 → 出</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">缓存读</th><th scope="col">耗时</th><th scope="col">状态</th><th scope="col">错误</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+        <div class="empty" id="logs-empty" style="display:none"><b>暂无请求</b>通过本地路由发起调用后，请求会显示在这里。</div>
+      </section>
+    </main>
   </div>
 
-  <main>
-    <!-- 渠道 -->
-    <section id="view-providers">
-      <div class="head">
-        <div><h1>渠道</h1><div class="sub" id="prov-sub">自由添加上游渠道;点「切换」直连某个渠道,或点「路由模式」让客户端经 :8787 按规则分发(写入前自动备份)</div></div>
-        <div style="display:flex;gap:8px">
-          <button id="btn-router" onclick="switchRouterMode()">⇄ 路由模式</button>
-          <button class="primary" onclick="openProvider()">＋ 新建渠道</button>
-        </div>
-      </div>
-      <div class="apptabs">
-        <button id="tab-claude" class="active" onclick="setApp('claude')"><span class="appdot" style="background:#d97757"></span>Claude Code</button>
-        <button id="tab-codex" onclick="setApp('codex')"><span class="appdot" style="background:#10a37f"></span>Codex</button>
-      </div>
-      <div class="liveinfo" id="liveinfo"></div>
-      <div class="banner" id="drift-banner"><span class="ic">⚠</span><span id="drift-text"></span></div>
-      <div class="grid" id="prov-grid"></div>
-      <div class="empty" id="prov-empty" style="display:none">
-        <b id="empty-title">还没有渠道</b><span id="empty-hint">点击右上角「新建渠道」添加</span>
-      </div>
-    </section>
-
-    <!-- 路由 -->
-    <section id="view-routes" style="display:none">
-      <div class="head"><div><h1>路由</h1><div class="sub">按模型名匹配(子串,逗号分隔,大小写不敏感);优先级大的先匹配,同优先级按从上到下</div></div>
-        <button class="primary" onclick="saveRoutes()">保存路由</button></div>
-      <div class="panel">
-        <h2>规则</h2>
-        <div class="hint">目标可以选单个渠道,也可以选<b>渠道池</b>——池里的渠道按会话粘性分给不同对话,
-          即同一个 Agent 的多个对话各走各的 key,对话内不会中途切换。目标模型留空 = 透传;带
-          <code style="font-family:var(--mono)">[1M]</code> 后缀 = 自动剥离并附加 context-1m beta 头</div>
-        <div id="rules-box"></div>
-        <div class="savebar"><button onclick="addRule()">＋ 添加规则</button><span class="msg" id="save-msg"></span></div>
-      </div>
-      <div class="panel">
-        <h2>默认路由</h2>
-        <div class="hint">所有规则都未命中时使用;可同样配成渠道池。未绑定渠道时请求报 503</div>
-        <div id="def-box"></div>
-      </div>
-    </section>
-
-    <!-- 会话 -->
-    <section id="view-sessions" style="display:none">
-      <div class="head">
-        <div><h1>会话</h1><div class="sub">每个对话锁定一个渠道;这里的改动立即对该对话生效,不影响其他对话(Claude Code 与 Codex 的对话都会出现在这里)</div></div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <select id="f-sess-app" onchange="sessApp=this.value;renderSessions()" style="width:auto">
-            <option value="">全部对话</option>
-            <option value="claude">仅 Claude Code</option>
-            <option value="codex">仅 Codex</option>
-          </select>
-          <button class="danger" onclick="clearSessions()">清空全部绑定</button>
-        </div>
-      </div>
-      <div class="chips" id="sess-chips"></div>
-      <table>
-        <thead><tr><th>会话</th><th>组</th><th>对话</th><th>渠道(可改)</th><th>模型</th><th>命中规则</th><th>请求</th><th>tokens 入/出</th><th>最近活跃</th><th></th></tr></thead>
-        <tbody id="sess-body"></tbody>
-      </table>
-      <div class="empty" id="sess-empty" style="display:none">
-        <b>还没有活跃对话</b>经 127.0.0.1:8787 的 Claude Code / Codex 会话会自动出现在这里,并按路由策略分到不同渠道
-      </div>
-    </section>
-
-    <!-- 日志 -->
-    <section id="view-logs" style="display:none">
-      <div class="head">
-        <div><h1>请求日志</h1><div class="sub">内存保留最近 500 条,落盘 logs/requests.jsonl(5MB 轮转);统计为内存窗口内全量聚合</div></div>
-        <label style="display:flex;align-items:center;gap:8px;color:var(--dim);font-size:13px">
-          <input type="checkbox" id="logs-auto" checked style="accent-color:var(--accent)"> 自动刷新(5s)
-        </label>
-      </div>
-      <div class="chips" id="stat-chips"></div>
-      <div class="logbar">
-        <label>分组
-          <select id="f-app">
-            <option value="">全部</option>
-            <option value="claude">Claude Code</option>
-            <option value="codex">Codex</option>
-          </select>
-        </label>
-        <label>渠道 <input type="text" id="f-provider" placeholder="渠道名子串"></label>
-        <label>模型 <input type="text" id="f-model" placeholder="模型名子串"></label>
-        <label>会话 <input type="text" id="f-session" placeholder="会话短 id"></label>
-        <label>状态
-          <select id="f-status">
-            <option value="">全部</option>
-            <option value="ok">仅成功 (2xx/3xx)</option>
-            <option value="err">仅失败 (4xx/5xx/断连)</option>
-          </select>
-        </label>
-        <button class="small" onclick="loadLogs()">应用</button>
-        <button class="small" onclick="clearFilters()">清空</button>
-      </div>
-      <table>
-        <thead><tr><th>时间</th><th>会话</th><th>渠道</th><th>模型 入 → 出</th><th>输入</th><th>输出</th><th>缓存读</th><th>耗时</th><th>状态</th><th>错误</th></tr></thead>
-        <tbody id="logs-body"></tbody>
-      </table>
-      <div class="empty" id="logs-empty" style="display:none"><b>暂无请求</b>经 127.0.0.1:8787 的调用会显示在这里</div>
-    </section>
-  </main>
-
-  <!-- 渠道编辑弹窗 -->
   <div class="mask" id="mask">
-    <div class="modal">
-      <h3 id="m-title">新建渠道</h3>
-      <label>名称 *</label><input type="text" id="m-name" placeholder="如 AgentRouter">
-      <label>Base URL * <span id="m-base-hint"></span></label><input type="text" id="m-base" placeholder="https://api.example.com">
-      <label>API Key <span id="m-key-hint"></span></label><input type="password" id="m-key" placeholder="sk-…">
-      <div id="m-claude-fields">
-        <label>模型列表(逗号分隔,第一个 = 主模型,写入 ANTHROPIC_MODEL;带 [1M] 后缀自动启用 1M beta)</label>
-        <input type="text" id="m-models" placeholder="claude-opus-5[1M], claude-sonnet-4-6">
-        <label>槽位模型(可选;填了才写 ANTHROPIC_DEFAULT_*_MODEL,留空保留客户端现有值)</label>
-        <div class="grid2">
-          <input type="text" id="m-slot-opus" placeholder="Opus 槽">
-          <input type="text" id="m-slot-sonnet" placeholder="Sonnet 槽">
-          <input type="text" id="m-slot-haiku" placeholder="Haiku 槽">
-          <span></span>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-title" aria-describedby="m-description" tabindex="-1">
+      <h3 id="m-title">新建渠道</h3><p class="description" id="m-description"></p>
+      <form id="provider-form" onsubmit="event.preventDefault();saveProvider()">
+        <label for="m-name">名称 <span aria-hidden="true">*</span></label><input type="text" id="m-name" placeholder="如团队网关" required autocomplete="off">
+        <label for="m-base">Base URL <span aria-hidden="true">*</span> <span id="m-base-hint"></span></label><input type="text" id="m-base" placeholder="https://api.example.com" required spellcheck="false">
+        <label for="m-key">API Key <span id="m-key-hint"></span></label><input type="password" id="m-key" placeholder="sk-…" autocomplete="new-password" spellcheck="false">
+        <div id="m-claude-fields">
+          <label for="m-models">模型列表（逗号分隔；支持 [1M] 后缀）</label><input type="text" id="m-models" placeholder="claude-opus-5[1M], claude-sonnet-4-6" spellcheck="false">
+          <fieldset><legend>Claude Code 槽位模型（可选，留空保留现有值）</legend><div class="grid2"><div><label for="m-slot-opus">Opus 槽</label><input type="text" id="m-slot-opus"></div><div><label for="m-slot-sonnet">Sonnet 槽</label><input type="text" id="m-slot-sonnet"></div><div><label for="m-slot-haiku">Haiku 槽</label><input type="text" id="m-slot-haiku"></div></div></fieldset>
         </div>
-      </div>
-      <div id="m-codex-fields" style="display:none">
-        <label>模型 *</label><input type="text" id="m-model" placeholder="如 gpt-5.6-sol">
-        <label>协议(wire_api)</label>
-        <select id="m-wire"><option value="responses">responses(推荐,新网关)</option><option value="chat">chat(completions 兼容)</option></select>
-        <div class="chk"><input type="checkbox" id="m-dropimg"><span>纯文本渠道(丢弃图片;勾上后 responses 里的图会换成一句说明再转发)</span></div>
-      </div>
-      <label>备注</label><input type="text" id="m-note" placeholder="">
-      <div class="chk"><input type="checkbox" id="m-enabled" checked><span>启用</span></div>
-      <div class="foot"><button onclick="closeModal()">取消</button><button class="primary" onclick="saveProvider()">保存</button></div>
+        <div id="m-codex-fields" style="display:none">
+          <label for="m-model">模型 <span aria-hidden="true">*</span></label><input type="text" id="m-model" placeholder="如 gpt-5.6-sol" spellcheck="false">
+          <label for="m-wire">上游协议（wire_api）</label><select id="m-wire"><option value="responses">Responses（推荐，新网关）</option><option value="chat">Chat Completions（兼容）</option></select>
+          <label class="chk" for="m-dropimg"><input type="checkbox" id="m-dropimg">纯文本渠道：转发时将 Responses 图片替换为文字说明</label>
+        </div>
+        <label for="m-note">备注</label><input type="text" id="m-note">
+        <label class="chk" for="m-enabled"><input type="checkbox" id="m-enabled" checked>启用渠道</label>
+        <div class="foot"><button type="button" onclick="closeModal()">取消</button><button type="submit" class="primary" id="save-provider">保存渠道</button></div>
+      </form>
     </div>
   </div>
-  <div id="toast"></div>
+  <div class="mask" id="confirm-mask"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-text" tabindex="-1"><h3 id="confirm-title">确认操作</h3><p id="confirm-text"></p><div class="foot"><button id="confirm-cancel" onclick="finishConfirm(false)">取消</button><button id="confirm-ok" class="primary" onclick="finishConfirm(true)">确认</button></div></div></div>
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 'use strict';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const COLORS = ['#4f8cff','#3ecf8e','#f5a623','#c792ea','#ff8a80','#4dd0e1','#ffd54f','#a1887f'];
-const APPS = { claude: { label: 'Claude Code', cfg: '~/.claude/settings.json' }, codex: { label: 'Codex', cfg: '~/.codex/config.toml' } };
-let state = null, view = 'providers', curApp = 'claude', editing = null, routesDraft = null, testResults = {}, logsTimer = null;
+const APPS = { claude: { label: 'Claude Code', cfg: '~/.claude/settings.json' }, codex: { label: 'Codex', cfg: '~/.codex/config.toml' }, zcode: { label: 'ZCode', cfg: '~/.zcode/v2/config.json' } };
+const GROUPS = { claude: 'Claude / Anthropic', codex: 'Codex / OpenAI' };
+const ZCODE_HELP = '保存后在 ZCode 模型选择器选择 Mixrouter · ...；如未出现请重启客户端，新会话生效';
+let state = null, view = 'providers', curApp = 'claude', zcodeWire = 'anthropic', editing = null, editingGroup = 'claude';
+let routesDraft = null, routesBase = '', routesDirty = false, routesRevision = 0, testResults = {}, logsTimer = null;
+let online = false, lastSync = null, refreshTask = null, activeDialog = null, returnFocus = null, confirmResolve = null, savingProvider = false;
+const providerGroup = () => curApp === 'zcode' ? (zcodeWire === 'anthropic' ? 'claude' : 'codex') : curApp;
+const providers = (group = providerGroup()) => state?.providers?.[group] || [];
+const allProviders = () => [...providers('claude'), ...providers('codex')];
+const zcodeSupported = () => !!state?.live && Object.hasOwn(state.live, 'zcode') && Object.hasOwn(state.current || {}, 'zcode');
+const handlerArg = value => esc(JSON.stringify(String(value))); // Escape both the JS string and its HTML attribute.
 
-async function api(path, opt) {
-  const r = await fetch(path, opt ? { headers: { 'Content-Type': 'application/json' }, ...opt } : undefined);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.status);
-  return j;
-}
-function toast(msg, cls = '') { const t = $('toast'); t.textContent = msg; t.className = cls; t.style.display = 'block';
-  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3000); }
-const fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
-const fmtUp = s => s >= 3600 ? (s/3600).toFixed(1) + 'h' : s >= 60 ? Math.floor(s/60) + 'm' + Math.floor(s%60) + 's' : s + 's';
-
-// ---------------- 状态轮询 ----------------
-async function refresh() {
+async function api(path, opt = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), path.includes('/test') ? 65000 : 12000);
   try {
-    state = await api('/api/state');
-    $('ver').textContent = state.version;
-    $('st-proxy').textContent = state.proxy_port;
-    $('st-ui').textContent = state.ui_port;
-    $('st-up').textContent = fmtUp(state.uptime_s);
-    $('st-req').textContent = state.stats.reqs;
-    $('st-tok').textContent = fmtTok(state.stats.inTok) + ' / ' + fmtTok(state.stats.outTok);
-    if (view === 'providers') renderProviders();
-    if (view === 'routes') renderRoutes();
-    if (view === 'sessions') renderSessions();
-  } catch (e) { /* 控制台短暂不可达时静默 */ }
+    const r = await fetch(path, { ...opt, headers: { 'Content-Type': 'application/json', ...opt.headers }, signal: controller.signal, cache: 'no-store' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    return j;
+  } finally { clearTimeout(timer); }
 }
-setInterval(refresh, 5000);
+function toast(msg, cls = '') {
+  const t = $('toast'); t.textContent = msg; t.className = cls; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', msg.length > 65 ? 10000 : 4500);
+}
+const fmtTok = n => n == null ? '—' : n >= 1000000 ? (n / 1000000).toFixed(1) + 'm' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+const fmtUp = s => s == null ? '—' : s >= 3600 ? (s/3600).toFixed(1) + 'h' : s >= 60 ? Math.floor(s/60) + 'm' + Math.floor(s%60) + 's' : s + 's';
 
-// ---------------- 视图切换 ----------------
-const VIEWS = ['providers', 'routes', 'sessions', 'logs'];
-document.querySelectorAll('nav a').forEach(a => a.onclick = () => {
-  view = a.dataset.view;
-  document.querySelectorAll('nav a').forEach(x => x.classList.toggle('active', x === a));
-  for (const v of VIEWS) $('view-' + v).style.display = v === view ? '' : 'none';
-  if (view === 'logs') { loadLogs(); loadStats(); restartLogsTimer(); } else { clearInterval(logsTimer); logsTimer = null; }
-  refresh();
+// Dialogs share Escape, focus containment and restoration, including destructive confirmations.
+function showDialog(id, focusId) {
+  if (activeDialog) return;
+  returnFocus = document.activeElement;
+  activeDialog = $(id);
+  activeDialog.classList.add('show');
+  $('sidebar').inert = true; $('workspace').inert = true;
+  document.body.style.overflow = 'hidden';
+  $(focusId).focus();
+}
+function hideDialog() {
+  if (!activeDialog) return;
+  activeDialog.classList.remove('show'); activeDialog = null;
+  $('sidebar').inert = false; $('workspace').inert = false;
+  document.body.style.overflow = '';
+  const target = returnFocus?.isConnected ? returnFocus : $('tab-' + curApp);
+  target.focus(); returnFocus = null;
+}
+function askConfirm(title, message, action = '确认') {
+  if (activeDialog) return Promise.resolve(false);
+  $('confirm-title').textContent = title; $('confirm-text').textContent = message; $('confirm-ok').textContent = action;
+  return new Promise(resolve => { confirmResolve = resolve; showDialog('confirm-mask', 'confirm-cancel'); });
+}
+function finishConfirm(result) { const resolve = confirmResolve; confirmResolve = null; hideDialog(); if (resolve) resolve(result); }
+document.addEventListener('keydown', e => {
+  if (!activeDialog) return;
+  if (e.key === 'Escape') { e.preventDefault(); if (confirmResolve) finishConfirm(false); else closeModal(); return; }
+  if (e.key !== 'Tab') return;
+  const items = [...activeDialog.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')].filter(el => el.getClientRects().length);
+  const first = items[0], last = items[items.length - 1];
+  if (!first) { e.preventDefault(); activeDialog.querySelector('.modal').focus(); }
+  else if (e.shiftKey && (document.activeElement === first || !items.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !items.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+});
+document.addEventListener('focusin', e => {
+  if (activeDialog && !activeDialog.contains(e.target)) activeDialog.querySelector('.modal').focus();
 });
 
-// ---------------- 应用切换 ----------------
-function setApp(app) {
-  curApp = app;
-  $('tab-claude').classList.toggle('active', app === 'claude');
-  $('tab-codex').classList.toggle('active', app === 'codex');
-  renderProviders();
+function setConnection(connected, error = '') {
+  online = connected; document.body.dataset.connection = connected ? 'online' : 'offline';
+  $('connection-label').textContent = connected ? '控制台已连接' : '控制台离线';
+  $('connection-banner').classList.toggle('show', !connected);
+  $('connection-message').textContent = connected ? '' : `无法获取实时状态${error ? '：' + error : ''}。${lastSync ? '当前为 ' + lastSync.toLocaleTimeString('zh-CN', { hour12: false }) + ' 的最后快照，运行时长和指标已停止更新。' : '尚无可用快照。'}每 5 秒自动重试；路由草稿仍保留。`;
+  $('new-provider').disabled = !state;
+  $('save-routes').disabled = !connected || !routesDraft || savingRoutes;
+  $('add-rule').disabled = !routesDraft;
 }
+function renderOverview() {
+  const ps = allProviders(), stats = state.stats || {};
+  $('ver').textContent = state.version ?? '—';
+  $('st-proxy').textContent = state.proxy_port ?? '—'; $('st-ui').textContent = state.ui_port ?? '—';
+  $('st-up').textContent = fmtUp(state.uptime_s); $('st-req').textContent = stats.reqs ?? '—';
+  $('st-tok').textContent = fmtTok(stats.inTok) + ' / ' + fmtTok(stats.outTok);
+  $('metric-providers').textContent = ps.filter(p => p.enabled).length;
+  $('metric-providers-hint').textContent = `共 ${ps.length} 个渠道 · 启用不代表连通`;
+  $('metric-requests').textContent = fmtTok(stats.reqs);
+  $('metric-tokens').textContent = stats.inTok == null || stats.outTok == null ? '—' : fmtTok(stats.inTok + stats.outTok);
+  $('metric-tokens-hint').textContent = `输入 ${fmtTok(stats.inTok)} / 输出 ${fmtTok(stats.outTok)}`;
+  $('metric-sessions').textContent = state.sessions?.length ?? '—';
+  $('metric-sessions-hint').textContent = `${state.cooldowns?.length ?? 0} 个渠道冷却中 · 按协议归组`;
+  for (const app of Object.keys(APPS)) {
+    const count = app === 'zcode' ? ps.length : providers(app).length;
+    $('count-' + app).textContent = count;
+    $('tab-' + app).setAttribute('aria-label', `${APPS[app].label}，${count} 个${app === 'zcode' ? '共享' : ''}渠道`);
+  }
+}
+// Polling updates status only: route editor DOM is initialized once, never rebuilt by refresh.
+function refresh() {
+  if (refreshTask) return refreshTask;
+  $('refresh-btn').disabled = true;
+  refreshTask = (async () => {
+    try {
+      const next = await api('/api/state');
+      if (!next.providers || !next.routes || !next.current || !next.live) throw new Error('状态数据不完整');
+      state = next; lastSync = new Date();
+      if (!routesDraft) { routesDraft = structuredClone(state.routes); routesBase = JSON.stringify(state.routes); renderRoutes(); }
+      renderOverview(); setConnection(true); updateRouteStatus();
+      if (view === 'providers') renderProviders();
+      if (view === 'sessions' && !activeDialog && !$('sess-body').contains(document.activeElement)) renderSessions();
+      return true;
+    } catch (e) { setConnection(false, e.message); if (view === 'providers') renderProviders(); return false; }
+    finally { $('refresh-btn').disabled = false; refreshTask = null; }
+  })();
+  return refreshTask;
+}
+setInterval(refresh, 5000);
+window.addEventListener('offline', () => { setConnection(false, '网络连接已断开'); renderProviders(); });
+window.addEventListener('online', refresh);
+
+const VIEWS = ['providers', 'routes', 'sessions', 'logs'];
+const VIEW_LABELS = { providers: '渠道', routes: '路由', sessions: '会话', logs: '请求日志' };
+document.querySelectorAll('nav a').forEach(a => a.onclick = e => {
+  e.preventDefault(); view = a.dataset.view;
+  document.querySelectorAll('nav a').forEach(x => { x.classList.toggle('active', x === a); if (x === a) x.setAttribute('aria-current', 'page'); else x.removeAttribute('aria-current'); });
+  for (const v of VIEWS) $('view-' + v).style.display = v === view ? '' : 'none';
+  $('breadcrumb-view').textContent = VIEW_LABELS[view];
+  if (view === 'logs') { loadLogs(); loadStats(); restartLogsTimer(); } else { clearInterval(logsTimer); logsTimer = null; }
+  if (view === 'providers') renderProviders();
+  if (view === 'sessions') renderSessions();
+  refresh();
+});
+function setApp(app) {
+  if (!APPS[app]) return;
+  curApp = app;
+  for (const key of Object.keys(APPS)) { const tab = $('tab-' + key); tab.classList.toggle('active', key === app); tab.setAttribute('aria-selected', String(key === app)); tab.tabIndex = key === app ? 0 : -1; }
+  $('agent-panel').setAttribute('aria-labelledby', 'tab-' + app);
+  $('zcode-protocol').hidden = app !== 'zcode'; renderProviders();
+}
+function setZcodeWire(wire) { if (['anthropic', 'responses', 'chat'].includes(wire)) { zcodeWire = wire; renderProviders(); } }
+document.querySelector('.apptabs').addEventListener('keydown', e => {
+  const keys = Object.keys(APPS); let i = keys.indexOf(curApp);
+  if (e.key === 'ArrowRight') i = (i + 1) % keys.length;
+  else if (e.key === 'ArrowLeft') i = (i + keys.length - 1) % keys.length;
+  else if (e.key === 'Home') i = 0; else if (e.key === 'End') i = keys.length - 1; else return;
+  e.preventDefault(); setApp(keys[i]); $('tab-' + keys[i]).focus();
+});
 
 // ---------------- 渠道 ----------------
+function routerBase(app = curApp) {
+  const r = state?.router || {};
+  return app === 'zcode' ? (r.zcode_base || r.url || '') : app === 'claude' ? (r.claude_base || r.url || '') : (r.codex_base || r.url || '');
+}
 function liveLine() {
-  if (!state) return '';
-  const lv = state.live[curApp], cur = state.current[curApp], RouterId = (state.router || {}).id || '@router';
-  const curName = cur && cur !== RouterId ? (state.providers[curApp].find(p => p.id === cur) || {}).name : null;
-  let s = `${APPS[curApp].label} 当前生效: `;
-  if (lv.router) s += `<b>${esc(lv.base_url)}</b> <span style="color:var(--ok)">⇄ 路由模式</span> · ${esc(lv.model || '(未设模型)')} · 库内选中: <b>${cur === RouterId ? '路由模式' : (curName || '(无)')}</b>`;
-  else s += lv.base_url ? `<b>${esc(lv.base_url)}</b> · ${esc(lv.model || '(未设模型)')} · 库内选中: <b>${esc(curName || '(无)')}</b>` : '(未配置)';
-  if (curApp === 'codex' && !lv.router && lv.provider) s += ` · ${esc(lv.wire_api || '?')}`;
-  if ((curName || cur === RouterId) && !lv.match) s += ` <span class="warn">⚠ 客户端配置与所选渠道不一致,点渠道上的「切换」恢复</span>`;
-  return s;
+  const lv = state.live?.[curApp], cur = state.current?.[curApp];
+  const selected = allProviders().find(p => p.id === cur);
+  const healthy = online && lv && !lv.error;
+  const inRouter = healthy && !!lv.router, direct = healthy && !!lv.base_url && !lv.router;
+  const stateLabel = !online ? '离线 · 最后快照' : !lv ? '状态未提供' : lv.error ? '配置读取失败' : lv.base_url ? '已写入配置' : '尚未配置';
+  const modeBadge = enabled => enabled ? '<span class="badge on">已写入配置</span>' : `<span class="badge off">${!healthy ? '待确认' : '未接入'}</span>`;
+  return `<div class="mode-grid">
+    <article class="mode-card ${direct ? 'selected' : ''}"><div class="top"><h2>直连渠道</h2>${modeBadge(direct)}</div><p>${direct ? esc(lv.match === true ? selected?.name || lv.provider || '自定义上游' : lv.provider || '自定义上游（配置未匹配）') : '客户端直接请求上游，不经过本地路由'}</p><p class="mono">${esc(lv?.base_url && !lv.router ? lv.base_url : '从下方渠道卡片选择接入')}</p></article>
+    <article class="mode-card ${inRouter ? 'selected' : ''}"><div class="top"><h2>路由模式</h2>${modeBadge(inRouter)}</div><p>经本地代理按规则分发，按会话保持渠道粘性</p><p class="mono">${esc(inRouter ? lv.base_url || routerBase() : routerBase() || '等待后端提供路由地址')}</p></article>
+    </div><p class="config-line">${esc(APPS[curApp].cfg)} · ${stateLabel}${lv?.wire_api ? ' · 协议 ' + esc(lv.wire_api) : ''}${lv?.model ? ' · 配置模型 ' + esc(lv.model) : ''}${cur ? ' · 库内选中 ' + esc(cur === (state.router?.id || '@router') ? '路由模式' : selected?.name || cur) : ''}</p>
+    <p class="integration-note">${curApp === 'zcode' ? esc(ZCODE_HELP) + '。以上仅表示集成配置，不代表当前运行会话已切换；写入时合并并保留其他 provider，不默认更改现有默认模型。' : '切换会写入客户端配置，原文件自动备份。' + (curApp === 'claude' ? 'Claude Code 需重启会话生效。' : 'Codex 需重启生效。')}</p>`;
 }
 function renderProviders() {
-  if (!state) return;
-  const ps = state.providers[curApp];
-  const RouterId = (state.router || {}).id || '@router';
-  const inRouter = state.current[curApp] === RouterId || !!(state.live[curApp] || {}).router;
-  $('btn-router').textContent = inRouter ? '⇄ 路由模式(已启用)' : '⇄ 路由模式';
-  $('empty-title').textContent = `${APPS[curApp].label} 还没有渠道`;
-  $('empty-hint').textContent = curApp === 'claude'
-    ? '点击右上角「新建渠道」添加;点「路由模式」让 Claude Code 经 :8787,按模型名分发到不同渠道'
-    : '点击右上角「新建渠道」添加;点「路由模式」让 Codex 经 :8787 统一路由(chat 协议网关由代理自动翻译)';
-  $('prov-empty').style.display = ps.length ? 'none' : '';
+  const isZcode = curApp === 'zcode', group = providerGroup();
+  $('btn-router').textContent = isZcode ? '接入路由' : '路由模式';
+  $('btn-router').disabled = !online || !state || (isZcode && !zcodeSupported());
+  $('zcode-group-hint').textContent = `复用 ${GROUPS[group]} 渠道库，不创建第三份渠道仓库。${group === 'codex' ? 'Responses 与 Chat 共用列表；直连接入按渠道卡片自身协议写入，路由接入使用上方所选协议。' : 'Anthropic 协议展示、新建和编辑 Claude 组渠道。'}编辑、启停和删除会同步影响使用该渠道库的客户端。`;
+  if (!state) {
+    if (!online && document.body.dataset.connection === 'offline') $('liveinfo').innerHTML = '<div class="empty"><b>无法读取客户端配置</b>请检查本地 Mixrouter 服务；连接恢复后会自动刷新。</div>';
+    return;
+  }
+  const ps = providers(group), query = $('provider-search').value.trim().toLowerCase(), filter = $('provider-filter').value;
+  const shown = ps.filter(p => (!query || [p.name, p.base_url, p.model, ...(p.models || []), ...Object.values(p.slots || {})].join(' ').toLowerCase().includes(query)) && (filter === 'all' || (filter === 'enabled' ? p.enabled : !p.enabled)));
+  $('channel-heading').textContent = isZcode ? `共享渠道 · ${GROUPS[group]}` : `${APPS[curApp].label} 渠道库`;
+  $('channel-count').textContent = `显示 ${shown.length} / ${ps.length} 个渠道 · ${ps.filter(p => p.enabled).length} 个已启用${isZcode ? ' · ZCode 复用，不重复计数' : ''}`;
+  $('prov-empty').hidden = shown.length > 0;
+  $('empty-title').textContent = ps.length ? '没有匹配的渠道' : `${GROUPS[group]} 还没有渠道`;
+  $('empty-hint').textContent = ps.length ? '尝试其他名称、URL 或模型，或清除启用状态筛选。' : `新建一个${isZcode ? '共享' : ''}渠道，填写上游地址与模型后即可配置直连或路由。`;
+  $('empty-action').textContent = ps.length ? '清除筛选' : '＋ 新建渠道';
+  $('empty-action').onclick = ps.length ? () => { $('provider-search').value = ''; $('provider-filter').value = 'all'; renderProviders(); $('provider-search').focus(); } : () => openProvider();
   $('liveinfo').innerHTML = liveLine();
-  // 配置漂移横幅(cc-switch 式琥珀警告)
-  const lv = state.live[curApp], curId = state.current[curApp];
-  const drifted = !!(curId && lv && !lv.match);
-  $('drift-banner').classList.toggle('show', drifted);
-  if (drifted) $('drift-text').textContent =
-    `${APPS[curApp].label} 的客户端真实配置与库内所选渠道不一致(配置漂移)。点当前渠道卡片上的「重新写入」即可恢复一致;写入前会自动备份原文件。`;
-  $('prov-grid').innerHTML = ps.map((p, i) => {
-    const isCur = state.current[curApp] === p.id;
-    const lv = state.live[curApp];
-    const drift = isCur && lv && !lv.match;
+  const lv = state.live?.[curApp], curId = state.current?.[curApp];
+  let warning = '';
+  if (isZcode && !zcodeSupported()) warning = '当前后端尚未提供 ZCode 集成状态，已禁用接入操作以免旧接口误写其他客户端。共享渠道仍可管理；请接入支持 ZCode 的后端后重试。';
+  else if (lv?.error) warning = `客户端配置读取失败：${lv.error}。无法确认集成状态，请检查配置后重试。`;
+  else if (online && lv && curId && lv.match === false) warning = `${APPS[curApp].label} 配置与库内选择不一致。${isZcode ? '可重新「接入 ZCode」或「接入路由」，然后在模型选择器选择对应模型。' : '可通过渠道「重新写入」或重新启用路由模式恢复，写入前自动备份。'}`;
+  $('drift-banner').classList.toggle('show', !!warning); $('drift-text').textContent = warning;
+  const html = shown.map(p => {
+    const isCur = curId === p.id, drift = isCur && lv?.match === false;
+    const verified = online && !lv?.error && isCur && lv?.match === true && !lv.router;
     const t = testResults[p.id];
-    const tline = !t ? '' : t.wait ? '<div class="testline wait">测试中…</div>'
-      : t.ok ? `<div class="testline ok">✓ 测试通过 · ${t.status} · ${t.ms}ms${t.model ? ' · ' + esc(t.model) : ''}</div>`
-      : `<div class="testline err">✗ 测试失败 · ${esc(t.error || ('HTTP ' + t.status))}${t.body ? ' · ' + esc(t.body.slice(0,120)) : ''}</div>`;
-    const modelTags = curApp === 'claude'
-      ? (p.models.length ? `<div class="tags">${p.models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}</div>` : '')
-      : `<div class="tags"><span class="tag">${esc(p.model)}</span><span class="tag">${esc(p.wire_api)}</span>${p.drop_images ? '<span class="tag">纯文本</span>' : ''}</div>`;
-    const slotTags = curApp === 'claude' && (p.slots && (p.slots.opus || p.slots.sonnet || p.slots.haiku))
-      ? `<div class="mono">槽位: ${esc(p.slots.opus || '-')} / ${esc(p.slots.sonnet || '-')} / ${esc(p.slots.haiku || '-')}</div>` : '';
-    return `<div class="card ${p.enabled ? '' : 'off'} ${isCur && !drift ? 'cur' : ''}">
-      <div class="top"><span class="cdot" style="background:${COLORS[i % COLORS.length]}"></span>
-        <span class="name">${esc(p.name)}</span>
-        ${isCur ? '<span class="badge on">✓ 当前</span>' : ''}
-        ${drift ? '<span class="badge drift">配置漂移</span>' : ''}
-        ${p.enabled ? '' : '<span class="badge off">停用</span>'}</div>
-      <div class="mono">${esc(p.base_url)}</div>
-      <div class="mono">key: ${esc(p.key_masked || '(未配置)')}</div>
-      ${modelTags}${slotTags}
-      ${p.note ? `<div class="note">${esc(p.note)}</div>` : ''}
-      ${tline}
-      <div class="foot">
-        <button class="small ${isCur ? 'cur' : 'primary'}" onclick="switchProvider('${p.id}')">${isCur ? '重新写入' : '切换'}</button>
-        <button class="small" onclick="testProvider('${p.id}')">测试</button>
-        <button class="small" onclick="openProvider('${p.id}')">编辑</button>
-        <button class="small danger" onclick="delProvider('${p.id}')">删除</button>
-      </div></div>`;
+    const tline = !t ? '' : t.wait ? '<div class="testline wait" role="status">测试中…</div>' : `<div class="testline ${t.ok ? 'ok' : 'err'}" role="status">上次测试${t.ok ? '通过' : '失败'} · ${esc(t.ok ? `${t.status} · ${t.ms}ms${t.model ? ' · ' + t.model : ''}` : t.error || ('HTTP ' + t.status))}${!t.ok && t.body ? ' · ' + esc(t.body.slice(0, 120)) : ''}</div>`;
+    const models = group === 'claude' ? (p.models || []) : [p.model].filter(Boolean);
+    const wire = group === 'claude' ? 'anthropic' : p.wire_api || 'responses';
+    const arg = handlerArg(p.id), locked = !online || (isZcode && !zcodeSupported());
+    return `<article class="card ${p.enabled ? '' : 'off'} ${verified ? 'cur' : ''}">
+      <div class="top"><span class="cdot" aria-hidden="true"></span><h3 class="name">${esc(p.name)}</h3>${isCur ? `<span class="badge ${verified ? 'on' : 'off'}">${verified ? '已写入配置' : '库内选中'}</span>` : ''}${drift && online ? '<span class="badge drift">配置不一致</span>' : ''}<span class="badge ${p.enabled ? 'info' : 'off'}">${p.enabled ? '启用' : '停用'}</span></div>
+      <div class="mono endpoint">${esc(p.base_url)}</div><div class="tags"><span class="tag">${esc(wire)}</span>${models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}${p.drop_images ? '<span class="tag">纯文本</span>' : ''}</div>
+      ${group === 'claude' && Object.values(p.slots || {}).some(Boolean) ? `<div class="mono">槽位 ${esc(p.slots.opus || '—')} / ${esc(p.slots.sonnet || '—')} / ${esc(p.slots.haiku || '—')}</div>` : ''}
+      <div class="mono">API key · ${esc(p.key_masked || '未配置')}</div>${p.note ? `<p class="note">${esc(p.note)}</p>` : ''}
+      ${isZcode && group === 'codex' && wire !== zcodeWire ? `<p class="note">此渠道按 ${esc(wire)} 协议接入，与上方路由协议选择不同。</p>` : ''}${tline}
+      <div class="foot"><button class="small ${verified ? 'cur' : 'primary'}" data-action="switch" data-provider="${esc(p.id)}" onclick="switchProvider(${arg})" ${locked ? 'disabled' : ''}>${isZcode ? '接入 ZCode' : isCur ? '重新写入' : '切换'}</button><button class="small" data-action="test" data-provider="${esc(p.id)}" onclick="testProvider(${arg})" ${!online || t?.wait ? 'disabled' : ''}>测试</button><button class="small" data-action="edit" data-provider="${esc(p.id)}" onclick="openProvider(${arg})">编辑</button><button class="small" data-action="toggle" data-provider="${esc(p.id)}" onclick="toggleProvider(${arg})" ${!online ? 'disabled' : ''}>${p.enabled ? '停用' : '启用'}</button><button class="small danger" data-action="delete" data-provider="${esc(p.id)}" onclick="delProvider(${arg})" ${!online ? 'disabled' : ''}>删除</button></div></article>`;
   }).join('');
+  // Avoid detaching focused card buttons or modal return targets on a status poll.
+  const grid = $('prov-grid');
+  if (grid.innerHTML !== html) {
+    if (activeDialog) return;
+    const focus = grid.contains(document.activeElement) ? { ...document.activeElement.dataset } : null;
+    grid.innerHTML = html;
+    if (focus) [...grid.querySelectorAll('button')].find(b => b.dataset.provider === focus.provider && b.dataset.action === focus.action)?.focus();
+  }
 }
 function openProvider(id) {
-  editing = id ? state.providers[curApp].find(p => p.id === id) : null;
-  const isCodex = curApp === 'codex';
-  $('m-title').textContent = (editing ? '编辑渠道 · ' : '新建渠道 · ') + APPS[curApp].label;
-  $('m-base-hint').textContent = isCodex ? '(含 /v1,如 https://agentrouter.org/v1)' : '';
-  $('m-name').value = editing ? editing.name : '';
-  $('m-base').value = editing ? editing.base_url : '';
-  $('m-key').value = '';
-  $('m-key-hint').textContent = editing ? '(留空 = 保持不变,当前 ' + editing.key_masked + ')' : '';
-  $('m-claude-fields').style.display = isCodex ? 'none' : '';
-  $('m-codex-fields').style.display = isCodex ? '' : 'none';
-  if (isCodex) {
-    $('m-model').value = editing ? editing.model : '';
-    $('m-wire').value = editing ? editing.wire_api : 'responses';
-    $('m-dropimg').checked = !!(editing && editing.drop_images);
-  } else {
-    $('m-models').value = editing ? editing.models.join(', ') : '';
-    $('m-slot-opus').value = editing && editing.slots ? editing.slots.opus : '';
-    $('m-slot-sonnet').value = editing && editing.slots ? editing.slots.sonnet : '';
-    $('m-slot-haiku').value = editing && editing.slots ? editing.slots.haiku : '';
-  }
-  $('m-note').value = editing ? editing.note : '';
-  $('m-enabled').checked = editing ? editing.enabled : true;
-  $('mask').classList.add('show');
+  if (!state || activeDialog) return;
+  editingGroup = providerGroup(); editing = id ? providers(editingGroup).find(p => p.id === id) : null;
+  if (id && !editing) return toast('渠道已不存在，请刷新后重试', 'err');
+  const isCodex = editingGroup === 'codex';
+  $('m-title').textContent = (editing ? '编辑渠道 · ' : '新建渠道 · ') + GROUPS[editingGroup];
+  $('m-description').textContent = curApp === 'zcode' ? '这是共享渠道库，修改对 Claude Code / Codex 同样可见。保存渠道不会写入 ZCode；请在渠道卡片上点击「接入 ZCode」。' : '保存到渠道库后，通过渠道卡片写入客户端配置。Claude 模型列表第一项作为主模型。';
+  $('m-base-hint').textContent = isCodex ? '（通常包含 /v1）' : '';
+  $('m-name').value = editing?.name || ''; $('m-base').value = editing?.base_url || ''; $('m-key').value = '';
+  $('m-key-hint').textContent = editing ? '（留空保持不变，当前 ' + (editing.key_masked || '未配置') + '）' : '';
+  $('m-claude-fields').style.display = isCodex ? 'none' : ''; $('m-codex-fields').style.display = isCodex ? '' : 'none';
+  $('m-model').required = isCodex;
+  $('m-model').value = editing?.model || ''; $('m-wire').value = editing?.wire_api || (curApp === 'zcode' && isCodex ? zcodeWire : 'responses');
+  $('m-dropimg').checked = !!editing?.drop_images; $('m-models').value = (editing?.models || []).join(', ');
+  for (const slot of ['opus', 'sonnet', 'haiku']) $('m-slot-' + slot).value = editing?.slots?.[slot] || '';
+  $('m-note').value = editing?.note || ''; $('m-enabled').checked = editing ? !!editing.enabled : true;
+  showDialog('mask', 'm-name');
 }
-function closeModal() { $('mask').classList.remove('show'); }
+function closeModal() { if (savingProvider) return toast('正在保存，请稍候'); hideDialog(); $('m-key').value = ''; }
 async function saveProvider() {
-  const body = { app: curApp, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(),
-    api_key: $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
-  if (curApp === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; body.drop_images = $('m-dropimg').checked; }
-  else body.models = $('m-models').value,
-       body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), haiku: $('m-slot-haiku').value.trim() };
+  if (savingProvider) return;
+  if (!online) return toast('控制台离线，表单已保留，请连接后保存', 'err');
+  if (!$('provider-form').reportValidity()) return;
+  const body = { app: editingGroup, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(), api_key: $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
+  if (editingGroup === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; body.drop_images = $('m-dropimg').checked; }
+  else { body.models = $('m-models').value; body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), haiku: $('m-slot-haiku').value.trim() }; }
   if (!body.name || !body.base_url) return toast('名称与 Base URL 必填', 'err');
-  if (curApp === 'codex' && !body.model) return toast('Codex 渠道必须填模型名', 'err');
+  if (editingGroup === 'codex' && !body.model) return toast('OpenAI 渠道必须填模型名', 'err');
+  try { const url = new URL(body.base_url); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); } catch { $('m-base').focus(); return toast('请输入合法的 http(s) Base URL', 'err'); }
+  savingProvider = true; $('save-provider').disabled = true;
   try {
-    if (editing) await api('/api/providers/' + editing.id, { method: 'PUT', body: JSON.stringify(body) });
-    else await api('/api/providers', { method: 'POST', body: JSON.stringify(body) });
-    closeModal(); toast('已保存', 'ok'); refresh();
-  } catch (e) { toast('保存失败:' + e.message, 'err'); }
+    if (editing) await api('/api/providers/' + encodeURIComponent(editing.id), { method: 'PUT', body: JSON.stringify(body) });
+    else {
+      const created = await api('/api/providers', { method: 'POST', body: JSON.stringify(body) });
+      // Older backends create channels enabled regardless of the POST flag.
+      if (!body.enabled && created.id) {
+        editing = { id: created.id };
+        await api('/api/providers/' + encodeURIComponent(created.id), { method: 'PUT', body: JSON.stringify({ app: editingGroup, enabled: false }) });
+      }
+    }
+    savingProvider = false; closeModal(); toast('渠道已保存；客户端配置未改动', 'ok'); await refresh();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  finally { savingProvider = false; $('save-provider').disabled = false; }
+}
+function canConnect(app) {
+  if (!online) { toast('控制台离线，请重新连接后操作', 'err'); return false; }
+  if (app === 'zcode' && !zcodeSupported()) { toast('当前后端尚未支持 ZCode 接入，未发送写入请求', 'err'); return false; }
+  return true;
 }
 async function switchProvider(id) {
-  const p = state.providers[curApp].find(x => x.id === id);
-  const target = curApp === 'claude' ? APPS.claude.cfg : APPS.codex.cfg;
-  if (!confirm(`把 ${APPS[curApp].label} 切换到「${p.name}」?\n将写入 ${target}(原文件自动备份)。\n${curApp === 'claude' ? 'Claude Code 需重启会话生效。' : 'Codex 需重启生效。'}`)) return;
+  const app = curApp, p = providers().find(x => x.id === id);
+  if (!p || !canConnect(app)) return;
+  const message = app === 'zcode'
+    ? `将「${p.name}」接入 ZCode，按渠道自身 ${providerGroup() === 'claude' ? 'anthropic' : p.wire_api || 'responses'} 协议写入 ${APPS.zcode.cfg}。合并并保留其他 provider，不默认更改现有默认模型。\n\n${ZCODE_HELP}。不会自动切换当前运行会话。`
+    : `将 ${APPS[app].label} 配置写入为「${p.name}」直连。\n文件：${APPS[app].cfg}（原文件自动备份）。\n${app === 'claude' ? 'Claude Code 需重启会话生效。' : 'Codex 需重启生效。'}`;
+  if (!await askConfirm(app === 'zcode' ? '接入 ZCode' : '写入直连配置', message, app === 'zcode' ? '接入 ZCode' : '写入配置') || !canConnect(app)) return;
   try {
-    const r = await api('/api/switch/' + id, { method: 'POST' });
-    toast(`已切换:${APPS[curApp].label} → ${p.name}`, 'ok');
-    refresh();
-  } catch (e) { toast('切换失败:' + e.message, 'err'); }
+    await api('/api/switch/' + encodeURIComponent(id), { method: 'POST', ...(app === 'zcode' ? { body: JSON.stringify({ app: 'zcode' }) } : {}) });
+    toast(app === 'zcode' ? `已保存 ZCode 集成配置。${ZCODE_HELP}` : `已写入 ${APPS[app].label} 配置 → ${p.name}，请重启${app === 'claude' ? '会话' : '客户端'}生效`, 'ok'); await refresh();
+  } catch (e) { toast('接入失败：' + e.message, 'err'); }
 }
 async function switchRouterMode() {
-  const app = curApp, R = state.router || {};
-  const target = app === 'claude' ? APPS.claude.cfg : APPS.codex.cfg;
-  const base = app === 'claude' ? (R.claude_base || 'http://127.0.0.1:8787') : (R.codex_base || 'http://127.0.0.1:8787/v1');
-  if (!confirm(`把 ${APPS[app].label} 切到「路由模式」?\n\n上游将改写为 ${base},此后请求按「路由」页的规则分发到不同渠道——同一个 Agent 的多个对话各走各的 key。\n写入 ${target}(原文件自动备份);${app === 'claude' ? 'Claude Code 需重启会话生效' : 'Codex 需重启生效'}。\n(渠道列表里的「切换」仍可随时改回直连某一家)`)) return;
+  const app = curApp, wire = zcodeWire;
+  if (!canConnect(app)) return;
+  const base = routerBase(app) || '后端提供的路由地址';
+  const message = app === 'zcode'
+    ? `将 ZCode 以 ${wire} 协议接入路由：${base}。\n流量归入 ${GROUPS[wire === 'anthropic' ? 'claude' : 'codex']} 组。\n写入 ${APPS.zcode.cfg}，合并并保留其他 provider，不默认更改现有默认模型。\n\n${ZCODE_HELP}。不会自动切换当前运行会话。`
+    : `将 ${APPS[app].label} 指向 ${base}，请求按路由规则分发，按会话保持渠道粘性。\n写入 ${APPS[app].cfg}（原文件自动备份）。${app === 'claude' ? 'Claude Code 需重启会话生效。' : 'Codex 需重启生效。'}\n可随时通过渠道卡片切回直连。`;
+  if (!await askConfirm(app === 'zcode' ? '接入路由' : '写入路由配置', message, '接入路由') || !canConnect(app)) return;
   try {
-    await api('/api/router/' + app, { method: 'POST' });
-    toast(`已切到路由模式:${APPS[app].label} → ${base}`, 'ok');
-    refresh();
-  } catch (e) { toast('切换失败:' + e.message, 'err'); }
+    await api('/api/router/' + app, { method: 'POST', ...(app === 'zcode' ? { body: JSON.stringify({ wire_api: wire }) } : {}) });
+    toast(app === 'zcode' ? `已保存路由集成配置。${ZCODE_HELP}` : `已写入 ${APPS[app].label} 路由配置，请重启${app === 'claude' ? '会话' : '客户端'}生效`, 'ok'); await refresh();
+  } catch (e) { toast('接入失败：' + e.message, 'err'); }
 }
 async function toggleProvider(id) {
-  const p = state.providers[curApp].find(x => x.id === id);
-  await api('/api/providers/' + id, { method: 'PUT', body: JSON.stringify({ enabled: !p.enabled }) });
-  refresh();
+  const p = providers().find(x => x.id === id), app = providerGroup();
+  if (!p || !online) return;
+  if (!await askConfirm(p.enabled ? '停用共享渠道' : '启用共享渠道', `「${p.name}」属于 ${GROUPS[app]} 渠道库；修改会影响该组路由及复用此渠道的客户端。停用不会撤销已写入客户端的直连配置。`, p.enabled ? '停用' : '启用')) return;
+  try { await api('/api/providers/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ app, enabled: !p.enabled }) }); toast('渠道状态已更新', 'ok'); await refresh(); }
+  catch (e) { toast('更新失败：' + e.message, 'err'); }
 }
 async function delProvider(id) {
-  const p = state.providers[curApp].find(x => x.id === id);
-  if (!confirm(`删除渠道「${p.name}」?`)) return;
-  await api('/api/providers/' + id, { method: 'DELETE' });
-  toast('已删除', 'ok'); refresh();
+  const p = providers().find(x => x.id === id);
+  if (!p || !online) return;
+  if (!await askConfirm('删除共享渠道', `删除「${p.name}」？这会从 ${GROUPS[providerGroup()]} 共享库移除渠道，影响所有复用方。客户端已写入的配置不会自动撤销，请同时检查关联路由。此操作不可撤销。`, '删除渠道')) return;
+  try { await api('/api/providers/' + encodeURIComponent(id), { method: 'DELETE' }); toast('渠道已删除', 'ok'); await refresh(); }
+  catch (e) { toast('删除失败：' + e.message, 'err'); }
 }
 async function testProvider(id) {
-  testResults[id] = { wait: true };
-  if (view === 'providers') renderProviders();
-  try {
-    const r = await api(`/api/providers/${id}/test`, { method: 'POST' });
-    testResults[id] = r;
-  } catch (e) { testResults[id] = { ok: false, error: e.message }; }
+  if (!online || testResults[id]?.wait) return;
+  testResults[id] = { wait: true }; if (view === 'providers') renderProviders();
+  try { testResults[id] = await api('/api/providers/' + encodeURIComponent(id) + '/test', { method: 'POST' }); }
+  catch (e) { testResults[id] = { ok: false, error: e.message }; }
   if (view === 'providers') renderProviders();
 }
 
@@ -509,130 +660,103 @@ const STRAT_LABEL = { round_robin: '轮询(新对话依次分配)', weighted: '�
 function blankRule() {
   return { id: 'r' + Date.now(), match: '', provider: '', model: '', pool: [], strategy: 'round_robin', priority: 0, app: '', when: {}, enabled: true };
 }
-function renderRoutes() {
-  if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
-  $('rules-box').innerHTML = routesDraft.rules.map(ruleCard).join('');
-  $('def-box').innerHTML = ruleTargetBox(routesDraft.default, 'def', '兜底');
+const poolModes = new WeakSet();
+function updateRouteStatus() {
+  if (!routesDraft) return;
+  const changed = state && JSON.stringify(state.routes) !== routesBase;
+  $('save-msg').textContent = changed ? '服务端配置已变化；草稿保留，重新载入可获取最新配置。' : routesDirty ? '有未保存更改 · 自动刷新不会覆盖草稿' : '草稿与上次载入一致 · 自动刷新不重绘表单';
 }
-// 一个规则的完整编辑卡:匹配 + 优先级 + 启用 | 目标(单渠道/池) | 匹配条件
-// 规则属于哪一组:显式声明优先;没声明就按池里渠道的归属推断(默认 Claude)
+function markRoutesDirty() { routesDirty = true; routesRevision++; updateRouteStatus(); }
+$('view-routes').addEventListener('input', e => { if (e.target.matches('input, select')) markRoutesDirty(); });
+$('view-routes').addEventListener('change', e => { if (e.target.matches('input, select')) markRoutesDirty(); });
+window.addEventListener('beforeunload', e => { if (routesDirty || (activeDialog?.id === 'mask')) { e.preventDefault(); e.returnValue = ''; } });
+function renderRoutes() {
+  if (!routesDraft) return;
+  const focused = document.activeElement;
+  const focusId = $('view-routes').contains(focused) ? focused.id : null;
+  $('rules-box').innerHTML = routesDraft.rules.length ? routesDraft.rules.map(ruleCard).join('') : '<div class="empty"><b>尚无匹配规则</b>请求将使用默认路由。添加规则可按模型、会话或客户端条件分流。</div>';
+  $('def-box').innerHTML = ruleTargetBox(routesDraft.default, 'def', '兜底');
+  if (focusId && $(focusId)) $(focusId).focus();
+}
 function appOfRule(r) {
   if (r.app === 'codex' || r.app === 'claude') return r.app;
   const ids = [(r.pool || []).map(m => typeof m === 'string' ? m : m.provider), r.provider ? [r.provider] : []].flat().filter(Boolean);
-  if (ids.some(id => state.providers.codex.some(p => p.id === id))) return 'codex';
-  return 'claude';
+  return ids.some(id => providers('codex').some(p => p.id === id)) ? 'codex' : 'claude';
 }
 function ruleCard(r, i) {
-  const isPool = (r.pool || []).length > 0;
   const app = appOfRule(r);
-  return `<div class="rulecard">
-    <div class="rc-head">
-      <span class="rc-idx">${i + 1}</span>
-      <input type="text" value="${esc(r.match)}" oninput="routesDraft.rules[${i}].match=this.value" placeholder="匹配请求模型名包含…,如 opus, claude-3-opus, gpt-5">
-      <label class="rc-mini">适用
-        <select onchange="setRuleApp(${i},this.value)">
-          <option value="" ${r.app ? '' : 'selected'}>两组通用</option>
-          <option value="claude" ${r.app === 'claude' ? 'selected' : ''}>Claude Code</option>
-          <option value="codex" ${r.app === 'codex' ? 'selected' : ''}>Codex</option>
-        </select>
-      </label>
-      <label class="rc-mini">优先级 <input type="number" value="${Number(r.priority) || 0}" oninput="routesDraft.rules[${i}].priority=Number(this.value)||0"></label>
-      <label class="rc-mini"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="routesDraft.rules[${i}].enabled=this.checked"> 启用</label>
-      <button class="iconbtn" onclick="delRule(${i})" title="删除规则">✕</button>
-    </div>
-    <div class="rc-body">
-      ${ruleTargetBox(r, i, '目标')}
-      <div class="rc-line">
-        <span class="rc-tag">条件</span>
-        <input type="text" value="${esc((r.when || {}).session || '')}" oninput="setWhen(${i},'session',this.value)" placeholder="会话 id 含…(可选)">
-        <input type="text" value="${esc((r.when || {}).ua || '')}" oninput="setWhen(${i},'ua',this.value)" placeholder="客户端 UA 含…(可选)">
-        <input type="text" value="${esc((r.when || {}).token || '')}" oninput="setWhen(${i},'token',this.value)" placeholder="客户端 token 含…(可选)">
-      </div>
-      <div class="pool-hint">目标只能选${app === 'codex' ? ' Codex' : ' Claude'} 组渠道(当前适用:${app === 'codex' ? 'Codex/OpenAI' : 'Claude/Anthropic'} 协议);规则里绑了另一组渠道时,那组请求会跳过它继续往下匹配</div>
-    </div></div>`;
+  return `<div class="rulecard"><div class="rc-head"><span class="rc-idx">${i + 1}</span>
+    <label class="field" for="rule-${i}-match">匹配模型<input id="rule-${i}-match" type="text" value="${esc(r.match)}" oninput="routesDraft.rules[${i}].match=this.value" placeholder="如 opus, claude-3-opus, gpt-5"></label>
+    <label class="rc-mini">适用<select id="rule-${i}-app" onchange="setRuleApp(${i},this.value)"><option value="" ${r.app ? '' : 'selected'}>两组通用</option><option value="claude" ${r.app === 'claude' ? 'selected' : ''}>Claude / Anthropic</option><option value="codex" ${r.app === 'codex' ? 'selected' : ''}>Codex / OpenAI</option></select></label>
+    <label class="rc-mini">优先级<input type="number" value="${Number(r.priority) || 0}" oninput="routesDraft.rules[${i}].priority=Number(this.value)||0"></label>
+    <label class="rc-mini"><input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="routesDraft.rules[${i}].enabled=this.checked">启用</label>
+    <button class="iconbtn" onclick="delRule(${i})" aria-label="删除第 ${i + 1} 条规则">×</button></div>
+    <div class="rc-body">${ruleTargetBox(r, i, '目标')}<div class="rc-line"><span class="rc-tag">条件</span>
+    ${[['session', '会话 ID', '会话 id 含…'], ['ua', '客户端 UA', '客户端 UA 含…'], ['token', '客户端 token', '客户端 token 含…']].map(([key, label, placeholder]) => `<label class="field">${label}（可选）<input type="text" value="${esc(r.when?.[key] || '')}" oninput="setWhen(${i},'${key}',this.value)" placeholder="${placeholder}"></label>`).join('')}
+    </div><div class="pool-hint">目标渠道属于 ${GROUPS[app]} 协议组；另一组请求会跳过不兼容的目标继续匹配。ZCode 按所选协议归组。</div></div></div>`;
 }
-// 目标编辑区:模式(单渠道 / 渠道池)+ 策略 + 成员勾选 + 目标模型
 function ruleTargetBox(r, key, label) {
-  const isPool = (r.pool || []).length > 0;
-  const app = appOfRule(r);
-  const field = key === 'def' ? 'routesDraft.default' : `routesDraft.rules[${key}]`;
+  const isPool = poolModes.has(r) || (r.pool || []).length > 0;
+  const app = appOfRule(r), field = key === 'def' ? 'routesDraft.default' : `routesDraft.rules[${key}]`;
   const ids = new Set((r.pool || []).map(m => typeof m === 'string' ? m : m.provider));
-  const wOf = id => { const m = (r.pool || []).find(x => typeof x === 'object' && x && x.provider === id); return m && m.weight ? m.weight : ''; };
-  const members = state.providers[app].map(p => `
-    <label class="poolitem ${ids.has(p.id) ? 'on' : ''}">
-      <input type="checkbox" ${ids.has(p.id) ? 'checked' : ''} onchange="togglePool('${key}','${p.id}',this.checked)">
-      <span>${esc(p.name)}</span>${p.enabled ? '' : '<span class="badge off">停用</span>'}
-      <input class="w" type="number" min="1" value="${wOf(p.id)}" placeholder="权重"
-        title="加权策略下的权重" oninput="setWeight('${key}','${p.id}',this.value)">
-    </label>`).join('');
-  const single = `<select onchange="${field}.provider=this.value">${ruleOpts(r.provider, app)}</select>`;
-  const pool = `<select onchange="${field}.strategy=this.value">
-      ${Object.keys(STRAT_LABEL).map(s => `<option value="${s}" ${r.strategy === s ? 'selected' : ''}>${STRAT_LABEL[s]}</option>`).join('')}
-    </select>
-    <div class="poolbox">${members || `<span class="pool-hint">还没有 ${APPS[app].label} 组渠道,先去「渠道」页添加(或把「适用」改成有渠道的那组)</span>`}</div>`;
-  return `<div class="rc-line">
-      <span class="rc-tag">${label}</span>
-      <select onchange="setPoolMode('${key}',this.value)">
-        <option value="single" ${isPool ? '' : 'selected'}>单一渠道</option>
-        <option value="pool" ${isPool ? 'selected' : ''}>渠道池(多对话分流)</option>
-      </select>
-      ${isPool ? pool : single}
-      <input type="text" value="${esc(r.model || '')}" oninput="${field}.model=this.value" placeholder="${app === 'codex' ? '目标模型(留空用渠道自带模型名)' : '目标模型,留空透传'}">
-    </div>`;
+  const wOf = id => { const m = (r.pool || []).find(x => typeof x === 'object' && x && x.provider === id); return m?.weight || ''; };
+  const members = providers(app).map((p, i) => `<div class="poolitem ${ids.has(p.id) ? 'on' : ''}"><label><input id="pool-${key}-${i}" type="checkbox" ${ids.has(p.id) ? 'checked' : ''} onchange="togglePool('${key}',${handlerArg(p.id)},this.checked)"><span>${esc(p.name)}</span>${p.enabled ? '' : '<span class="badge off">停用</span>'}</label><label>权重<input class="w" type="number" min="1" value="${esc(wOf(p.id))}" aria-label="${esc(p.name)} 的权重" oninput="setWeight('${key}',${handlerArg(p.id)},this.value)"></label></div>`).join('');
+  return `<div class="rc-line"><span class="rc-tag">${label}</span>
+    ${key === 'def' ? `<label class="field">协议组<select id="default-app" onchange="setDefaultApp(this.value)"><option value="claude" ${app === 'claude' ? 'selected' : ''}>Claude / Anthropic</option><option value="codex" ${app === 'codex' ? 'selected' : ''}>Codex / OpenAI</option></select></label>` : ''}
+    <label class="field">目标类型<select id="target-${key}-mode" onchange="setPoolMode('${key}',this.value)"><option value="single" ${isPool ? '' : 'selected'}>单一渠道</option><option value="pool" ${isPool ? 'selected' : ''}>渠道池（多对话分流）</option></select></label>
+    ${isPool ? `<label class="field">分配策略<select onchange="${field}.strategy=this.value">${Object.keys(STRAT_LABEL).map(s => `<option value="${s}" ${r.strategy === s ? 'selected' : ''}>${STRAT_LABEL[s]}</option>`).join('')}</select></label>` : `<label class="field">目标渠道<select onchange="${field}.provider=this.value">${ruleOpts(r.provider, app)}</select></label>`}
+    <label class="field">目标模型<input type="text" value="${esc(r.model || '')}" oninput="${field}.model=this.value" placeholder="${app === 'codex' ? '留空用渠道自带模型名' : '留空透传请求模型'}"></label>
+    ${isPool ? `<div class="poolbox">${members || `<span class="pool-hint">还没有 ${GROUPS[app]} 渠道，请先在渠道页添加。</span>`}</div>` : ''}</div>`;
 }
-// 路由目标只允许本组渠道(Claude 端点说 Anthropic,Codex 端点说 OpenAI)
 function ruleOpts(sel, app = 'claude') {
-  return '<option value="">(未绑定)</option>' + state.providers[app].map(p =>
-    `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
+  return '<option value="">未绑定</option>' + providers(app).map(p => `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '（停用）'}</option>`).join('');
 }
 function draftOf(key) { return key === 'def' ? routesDraft.default : routesDraft.rules[Number(key)]; }
-function setRuleApp(i, v) {
-  const r = routesDraft.rules[i];
-  if (v) r.app = v; else delete r.app;
-  // 换了组,原来的池成员多半不属于这组了:清空池/单目标,免得留下看不见的悬空绑定
-  const group = state.providers[v || appOfRule(r)] || [];
-  const poolIds = (r.pool || []).map(m => typeof m === 'string' ? m : m.provider);
-  if (!poolIds.some(id => group.some(p => p.id === id))) { r.pool = []; r.provider = ''; }
-  else if (r.provider && !group.some(p => p.id === r.provider)) r.provider = '';
-  renderRoutes();
+function changeRuleGroup(r, app) {
+  if (app) r.app = app; else delete r.app;
+  const group = providers(app || appOfRule(r));
+  r.pool = (r.pool || []).filter(m => group.some(p => p.id === (typeof m === 'string' ? m : m.provider)));
+  if (r.provider && !group.some(p => p.id === r.provider)) r.provider = '';
+  markRoutesDirty(); renderRoutes();
 }
+function setRuleApp(i, v) { changeRuleGroup(routesDraft.rules[i], v); }
+function setDefaultApp(v) { changeRuleGroup(routesDraft.default, v); }
 function setPoolMode(key, mode) {
-  const r = draftOf(key);
-  const first = state.providers[appOfRule(r)][0];
-  if (mode === 'pool') { r.pool = first ? [{ provider: first.id }] : []; r.provider = ''; }
-  else { r.pool = []; r.provider = r.provider || (first ? first.id : ''); }
-  renderRoutes();
+  const r = draftOf(key), first = providers(appOfRule(r))[0];
+  if (mode === 'pool') { poolModes.add(r); r.pool = first ? [{ provider: first.id }] : []; r.provider = ''; }
+  else { poolModes.delete(r); r.pool = []; r.provider = r.provider || first?.id || ''; }
+  markRoutesDirty(); renderRoutes();
 }
 function togglePool(key, id, on) {
-  const r = draftOf(key);
-  const list = (r.pool || []).map(m => typeof m === 'string' ? { provider: m } : m);
-  r.pool = on ? list.concat([{ provider: id }]) : list.filter(m => m.provider !== id);
-  renderRoutes();
+  const r = draftOf(key), list = (r.pool || []).map(m => typeof m === 'string' ? { provider: m } : m);
+  poolModes.add(r); r.pool = on ? list.concat([{ provider: id }]) : list.filter(m => m.provider !== id);
+  markRoutesDirty(); renderRoutes();
 }
 function setWeight(key, id, val) {
-  const r = draftOf(key);
-  const n = Number(val);
-  r.pool = (r.pool || []).map(m => {
-    const o = typeof m === 'string' ? { provider: m } : { ...m };
-    if (o.provider !== id) return o;
-    if (Number.isFinite(n) && n > 0) o.weight = n; else delete o.weight;
-    return o;
-  });
+  const r = draftOf(key), n = Number(val);
+  r.pool = (r.pool || []).map(m => { const o = typeof m === 'string' ? { provider: m } : { ...m }; if (o.provider === id) { if (Number.isFinite(n) && n > 0) o.weight = n; else delete o.weight; } return o; });
 }
-function setWhen(i, field, val) {
-  const r = routesDraft.rules[i];
-  r.when = r.when || {};
-  if (val.trim()) r.when[field] = val; else delete r.when[field];
+function setWhen(i, field, val) { const r = routesDraft.rules[i]; r.when = r.when || {}; if (val.trim()) r.when[field] = val; else delete r.when[field]; }
+function addRule() { if (!routesDraft) return; routesDraft.rules.push(blankRule()); markRoutesDirty(); renderRoutes(); $('rule-' + (routesDraft.rules.length - 1) + '-match').focus(); }
+function delRule(i) { routesDraft.rules.splice(i, 1); markRoutesDirty(); renderRoutes(); $('add-rule').focus(); }
+async function reloadRoutes() {
+  if (routesDirty && !await askConfirm('重新载入路由', '丢弃未保存草稿，使用服务端的最新路由配置？', '重新载入')) return;
+  if (!await refresh()) return;
+  routesDraft = structuredClone(state.routes); routesBase = JSON.stringify(state.routes); routesDirty = false;
+  renderRoutes(); updateRouteStatus(); toast('已载入最新路由', 'ok');
 }
-function addRule() { routesDraft.rules.push(blankRule()); renderRoutes(); }
-function delRule(i) { routesDraft.rules.splice(i, 1); renderRoutes(); }
+let savingRoutes = false;
 async function saveRoutes() {
+  if (!routesDraft || !online || savingRoutes) return;
+  if (JSON.stringify(state.routes) !== routesBase && !await askConfirm('覆盖服务端路由', '服务端路由已变化。保存将以当前草稿覆盖服务端配置，是否继续？', '保存草稿')) return;
+  const payload = JSON.stringify(routesDraft), revision = routesRevision;
+  savingRoutes = true; $('save-routes').disabled = true;
   try {
-    await api('/api/routes', { method: 'PUT', body: JSON.stringify(routesDraft) });
-    $('save-msg').textContent = '✓ 已保存 ' + new Date().toLocaleTimeString();
-    toast('路由已保存', 'ok');
-    refresh();
-  } catch (e) { toast('保存失败:' + e.message, 'err'); }
+    await api('/api/routes', { method: 'PUT', body: payload });
+    routesBase = payload; routesDirty = routesRevision !== revision;
+    toast(routesDirty ? '已保存提交时的路由；后续编辑仍在草稿中' : '路由已保存', 'ok'); await refresh(); updateRouteStatus();
+  } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  finally { savingRoutes = false; $('save-routes').disabled = !online; }
 }
 
 // ---------------- 会话 ----------------
@@ -647,7 +771,7 @@ function renderSessions() {
   const cool = state.cooldowns || [];
   $('sess-chips').innerHTML = [
     ['活跃对话', list.length],
-    ['Claude / Codex', `${all.filter(s => (s.app || 'claude') === 'claude').length} / ${all.filter(s => s.app === 'codex').length}`],
+    ['Anthropic / OpenAI', `${all.filter(s => (s.app || 'claude') === 'claude').length} / ${all.filter(s => s.app === 'codex').length}`],
     ['手动钉定', pinned],
     ['冷却中渠道', cool.length],
   ].map(([k, v]) => `<div class="chip">${k}<b>${esc(String(v))}</b></div>`).join('');
@@ -657,13 +781,13 @@ function renderSessions() {
     const hasPool = (state.routes.rules || []).concat([state.routes.default])
       .some(r => ((r.pool || []).some(m => (typeof m === 'string' ? m : m.provider) === s.provider)) || r.provider === s.provider);
     const opts = state.providers[app].map(p =>
-      `<option value="${p.id}" ${p.id === s.provider ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
+      `<option value="${esc(p.id)}" ${p.id === s.provider ? 'selected' : ''}>${esc(p.name)}${p.enabled ? '' : '(停用)'}</option>`).join('');
     return `<tr>
       <td><span class="sess-tag" title="${esc(s.key)}">${esc(s.short)}</span>
         <div style="font-size:11px;color:var(--dim);font-family:inherit">${esc(KIND_LABEL[s.kind] || s.kind || '')}</div></td>
-      <td><span class="badge ${app === 'codex' ? 'info' : 'on'}">${app === 'codex' ? 'Codex' : 'Claude'}</span></td>
+      <td><span class="badge ${app === 'codex' ? 'info' : 'on'}">${app === 'codex' ? 'OpenAI' : 'Anthropic'}</span></td>
       <td style="font-family:inherit"><span class="lbl" title="${esc(s.label || '')}">${esc(s.label || '-')}</span></td>
-      <td><select class="pin-sel" onchange="pinSession('${esc(s.key)}', this.value)">
+      <td><label class="sr-only" for="session-${esc(s.short)}">会话 ${esc(s.short)} 的渠道</label><select id="session-${esc(s.short)}" class="pin-sel" onchange="pinSession(${handlerArg(s.key)}, this.value)" ${!online ? 'disabled' : ''}>
             <option value="" ${s.provider ? '' : 'selected'}>(未绑定)</option>${opts}</select>
           ${s.pinned ? '<div style="font-size:11px;color:var(--accent)">已钉定</div>' : ''}
           ${s.cooldown ? '<div class="cool">⚠ 渠道冷却中</div>' : ''}
@@ -674,12 +798,13 @@ function renderSessions() {
       <td>${fmtTok(s.inTok || 0)} / ${fmtTok(s.outTok || 0)}</td>
       <td>${s.lastUsed ? new Date(s.lastUsed).toLocaleTimeString('zh-CN', { hour12: false }) : '-'}</td>
       <td><div class="sess-acts">
-        <button class="small" onclick="gotoLogs('${esc(s.short)}')">日志</button>
-        <button class="small danger" onclick="unbindSession('${esc(s.key)}')">解绑</button>
+        <button class="small" onclick="gotoLogs(${handlerArg(s.short)})">日志</button>
+        <button class="small danger" onclick="unbindSession(${handlerArg(s.key)})">解绑</button>
       </div></td></tr>`;
   }).join('');
 }
 async function pinSession(key, provider) {
+  if (!online) return toast('控制台离线，未改绑会话', 'err');
   try {
     await api('/api/sessions/' + encodeURIComponent(key) + '/pin', { method: 'POST', body: JSON.stringify({ provider }) });
     toast(provider ? '已改绑该对话' : '已解除钉定,下次请求重新分配', 'ok');
@@ -687,13 +812,14 @@ async function pinSession(key, provider) {
   } catch (e) { toast('改绑失败:' + e.message, 'err'); }
 }
 async function unbindSession(key) {
+  if (!online) return toast('控制台离线，未解绑会话', 'err');
   try { await api('/api/sessions/' + encodeURIComponent(key), { method: 'DELETE' }); toast('已解绑', 'ok'); refresh(); }
   catch (e) { toast('解绑失败:' + e.message, 'err'); }
 }
 async function clearSessions() {
-  if (!confirm('清空所有会话绑定?所有对话会在下次请求时按策略重新分配渠道。')) return;
-  await api('/api/sessions', { method: 'DELETE' });
-  toast('已清空会话绑定', 'ok'); refresh();
+  if (!online || !await askConfirm('清空全部会话绑定', '所有协议组的对话将在下次请求时按策略重新分配渠道，包括 ZCode 按协议归组的流量。', '清空绑定')) return;
+  try { await api('/api/sessions', { method: 'DELETE' }); toast('已清空会话绑定', 'ok'); refresh(); }
+  catch (e) { toast('清空失败：' + e.message, 'err'); }
 }
 function gotoLogs(short) {
   document.querySelector('nav a[data-view="logs"]').click();
@@ -713,9 +839,18 @@ async function loadStats() {
       ['缓存读', fmtTok(s.cache)],
     ];
     $('stat-chips').innerHTML = chips.map(([k, v]) => `<div class="chip">${k}<b>${esc(String(v))}</b></div>`).join('');
-  } catch {}
+    setLogError('stats', '');
+  } catch (e) { setLogError('stats', '统计读取失败：' + e.message); }
+}
+let logsSequence = 0;
+const logErrors = {};
+function setLogError(source, message) {
+  logErrors[source] = message; const messages = Object.values(logErrors).filter(Boolean);
+  $('logs-error').textContent = messages.join('；') + (messages.length ? '。已有数据为上次读取的快照。' : '');
+  $('logs-error').classList.toggle('show', messages.length > 0);
 }
 async function loadLogs() {
+  const sequence = ++logsSequence;
   try {
     const q = new URLSearchParams();
     if ($('f-app').value) q.set('app', $('f-app').value);
@@ -725,16 +860,17 @@ async function loadLogs() {
     if ($('f-status').value) q.set('status', $('f-status').value);
     q.set('limit', '200');
     const { logs } = await api('/api/logs?' + q.toString());
+    if (sequence !== logsSequence) return;
     $('logs-empty').style.display = logs.length ? 'none' : '';
-    $('logs-empty').innerHTML = '<b>没有匹配的请求</b>调整筛选条件或经 127.0.0.1:8787 发起调用';
+    $('logs-empty').innerHTML = '<b>没有匹配的请求</b>调整筛选条件，或通过本地路由发起调用。';
     $('logs-body').innerHTML = logs.map(l => {
-      const cls = l.status >= 500 || l.status === 0 ? 'st5' : l.status >= 400 ? 'st4' : 'st2';
+      const cls = l.status >= 500 || l.status === 0 || l.err ? 'st5' : l.status >= 400 ? 'st4' : 'st2';
       const sess = l.session
         ? `<span class="sess-tag" title="${esc(l.session_kind || '')}">${esc(l.session)}</span>`
         : '<span style="color:var(--dim)">-</span>';
       const fo = l.failover ? ' <span class="cool" title="首选渠道失败,已转移到当前渠道">↷转移</span>' : '';
       const tr = l.wire === 'chat' && (l.kind === 'responses') ? ' <span class="cool" title="responses→chat 协议翻译">⇄翻译</span>' : '';
-      const appTag = l.app === 'codex' ? '<span class="badge info" style="font-size:10px">Cx</span> ' : '';
+      const appTag = l.app === 'codex' ? '<span class="badge info">OpenAI</span> ' : '<span class="badge info">Anthropic</span> ';
       return `<tr><td>${esc(l.ts.slice(5, 19))}</td><td>${sess}</td>
         <td style="font-family:inherit">${appTag}${esc(l.provider || '-')}${fo}${tr}</td>
         <td>${esc(l.model_in)}${l.model_out && l.model_out !== l.model_in ? ' → ' + esc(l.model_out) : ''}</td>
@@ -742,7 +878,8 @@ async function loadLogs() {
         <td>${l.ms ? l.ms + 'ms' : '-'}</td><td class="${cls}">${l.status || '-'}</td>
         <td style="color:var(--err)">${esc(l.err || '')}</td></tr>`;
     }).join('');
-  } catch {}
+    setLogError('logs', '');
+  } catch (e) { if (sequence === logsSequence) setLogError('logs', '日志读取失败：' + e.message); }
 }
 function clearFilters() {
   $('f-app').value = ''; $('f-provider').value = ''; $('f-model').value = ''; $('f-session').value = ''; $('f-status').value = '';

@@ -12,14 +12,14 @@
   Codex 带 `session-id`/`thread-id`(body 里是 `prompt_cache_key`),代理以它为「对话」身份,
   把渠道池的成员按会话粘性分配——开三个对话就是三个渠道的 key 在并发,
   且一个对话内不会中途换渠道打断 prompt 缓存
-- **渠道分 Claude Code / Codex 两组**,自由增删改查;**「切换」**直连某一家,
-  **「路由模式」**一键把客户端指向代理按规则分发(都写真实配置,自动备份)
+- **Agent 支持 Claude Code / Codex / ZCode**。渠道按 Anthropic / OpenAI 两组复用，无需为 ZCode 重复保存 Key；
+  **「切换」**让 Claude Code / Codex 直连渠道，**「接入 ZCode」**注册模型，**「路由模式」**指向本地代理（写入前自动备份）。
 - **路由核心**:按模型名匹配规则,目标可绑单一渠道,也可绑**渠道池**(按策略分发);
   规则可用 `app` 限定只对某一组生效
 - **失败转移**:池里首选渠道 429/5xx/连不上时,趁还没给客户端写字节自动换下一个,并把该渠道打入冷却
-- **控制台 UI 对齐 cc-switch 视觉语言**:软色状态徽章、当前渠道翠绿描边发光、漂移琥珀警告横幅、
-  虚线空态、右上角滑入 toast;**会话视图**(看每个对话落在哪个渠道并手动改绑)、
-  路由编辑器(池/策略/优先级/匹配条件/分组)、请求日志统计条 + 分组/渠道/模型/会话/状态筛选
+- **响应式控制台**：Agent 选择、概览统计、渠道搜索与启停筛选、直连/路由状态与配置漂移提示；
+  会话列表可手动改绑，路由编辑器支持渠道池、策略、优先级和匹配条件，请求日志支持多条件筛选。
+  支持键盘操作和窄屏布局；连接中断会明确显示离线，路由草稿不会被后台轮询覆盖。
 
 ```
 ~/mixrouter/
@@ -54,9 +54,8 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
   | `HEAD <上面任意端点>` | 探活(供客户端探测) | — |
 
   响应头带 `x-mixrouter-app` / `x-mixrouter-provider` / `x-mixrouter-model` / `x-mixrouter-session` 便于排查。
-- **控制台 8788**:顶部 Claude Code / Codex 应用切换(仿 cc-switch);渠道卡片支持
-  测试 / 编辑 / 删除 / **切换** / **路由模式**;「当前」渠道与客户端真实配置不一致时显示"配置漂移"告警;
-  路由编辑、会话列表与实时请求日志。
+- **控制台 8788**：顶部可选 Claude Code / Codex / ZCode；渠道支持搜索、筛选、测试、编辑、删除及客户端接入。
+  配置状态与库内记录不一致时显示漂移告警；另有路由编辑、会话列表与实时请求日志。
 - **切换(Claude Code)**:只改 `~/.claude/settings.json` 的 env 里 `ANTHROPIC_BASE_URL /
   AUTH_TOKEN / MODEL`(+ 可选槽位 `ANTHROPIC_DEFAULT_*_MODEL`,渠道没填就不动),其余键原样保留。
 - **切换(Codex)**:对 `~/.codex/config.toml` 做外科手术——顶层 `model / model_provider`
@@ -80,6 +79,30 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
 - Codex:`base_url` → `http://127.0.0.1:8787/v1`,`wire_api = "responses"`,
   `experimental_bearer_token = "mixrouter-local"`(占位),**顶层 `model` 保持不动**。
 - 真实 key 全部留在 `providers.json` 里,代理转发时才注入;客户端配置里不再有上游 key。
+
+## ZCode 接入
+
+1. 控制台选择 **ZCode**，再选 Anthropic、OpenAI Responses 或 OpenAI Chat 协议。
+2. 复用对应组的渠道，点击 **接入 ZCode** 注册直连配置；也可点击 **接入路由** 注册本地代理配置。
+3. 在 ZCode 的模型选择器中选择 **Mixrouter · …** 模型。如新条目未出现，请重启客户端并新建会话。
+
+只写入桌面端 `~/.zcode/v2/config.json` 的自有 provider 条目，**不会修改默认模型、已有会话、其它服务商或 CLI 扩展配置**。
+控制台显示的是“已注册的接入配置”，不是正在运行的 ZCode 会话所选模型。原文件损坏或自有名称发生冲突时拒绝覆盖；写入使用自动备份与原子替换。
+
+| 接入协议 | ZCode provider kind | 复用渠道组 |
+| --- | --- | --- |
+| Anthropic | `anthropic` | Claude / Anthropic |
+| OpenAI Responses | `openai` | Codex / OpenAI |
+| OpenAI Chat | `openai-compatible` | Codex / OpenAI 中的 chat 渠道 |
+
+ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒充第三种协议。
+路由接入需要对应组至少有一个启用且已填写模型的渠道，真实上游 Key 仍留在 Mixrouter 中。
+
+```bash
+./mixctl route zcode                 # 默认 Anthropic
+./mixctl route zcode responses       # OpenAI Responses
+./mixctl route zcode chat            # OpenAI Chat
+```
 
 ## 会话级渠道分发(v3 核心)
 
@@ -172,7 +195,7 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
 
 ## 已验证
 
-- **自动化测试 99 条全绿**(`npm test`,Node ≥ 18,CI 在 18/22/24 三档跑):
+- **自动化测试**（`npm test`，Node ≥ 18，CI 在 18/22/24 三档跑）：
   - 纯函数:模型改写与 `[1M]` beta 头合并、header 消洗、SSE/JSON usage 抽取(三种协议)、key 脱敏、
     TOML 转义、路由解析(优先级/停用/默认兜底/分组)、会话身份识别(Claude 三级 + Codex 四级)、
     `when` 条件、规则归一化、UA 优先级、responses⇄chat 请求翻译、`chatJsonToResponses`。
@@ -204,7 +227,7 @@ npm test                 # node --test test/*.test.js
 ```
 
 - 测试不依赖任何安装步骤(零依赖),运行时数据经 `MIXR_DATA_DIR`、
-  `MIXR_CLAUDE_SETTINGS`、`MIXR_CODEX_CONFIG` 环境变量重定向到临时目录,**永不触碰真实配置**。
+  `MIXR_CLAUDE_SETTINGS`、`MIXR_CODEX_CONFIG`、`MIXR_ZCODE_CONFIG` 环境变量重定向到临时目录，**永不触碰真实配置**。
 - `mixrouter.js` 被 require 时不自动起服务、不注册异常兜底(便于测试);直接 `node mixrouter.js` 才进入常驻模式。
 - 改完 UI 记得确认控制台还能开:`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8788/`。
 - 发版:推 `v*` tag → Release 工作流先跑测试,通过后打源码包并创建 GitHub Release。

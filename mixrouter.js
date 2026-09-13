@@ -20,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const zcodeConfig = require('./lib/zcode-config');
 
 const VERSION = '3.1.0';
 const ROOT = __dirname;
@@ -83,7 +84,7 @@ function loadStore() {
   return { claude: (raw && raw.claude) || [], codex: (raw && raw.codex) || [] };
 }
 let store = loadStore();
-let current = { claude: null, codex: null };
+let current = { claude: null, codex: null, zcode: null };
 { const raw = loadJson(PROVIDERS_FILE, null); if (raw && raw.current) current = { ...current, ...raw.current }; }
 
 const saveStore = () => saveJson(PROVIDERS_FILE, { version: 2, current, claude: store.claude, codex: store.codex });
@@ -803,6 +804,8 @@ function classifyProxyRequest(req) {
 // (都是 responses:原样转发;chat:只开 completions 的网关,由代理现场翻译)
 const wireOf = (provider, app) => app === 'claude' ? 'anthropic' : (provider.wire_api === 'chat' ? 'chat' : 'responses');
 const upstreamPathOf = (wire, ep) => wire === 'anthropic' ? ep.path : (wire === 'chat' ? '/v1/chat/completions' : '/v1/responses');
+// Channel bases may already end in /v1. Keep custom prefixes, append the version once.
+const joinUpstreamPath = (pathname, endpoint) => pathname.replace(/\/+$/, '').replace(/\/v1$/, '') + endpoint;
 
 // GET /v1/models:只读清单(Codex 组渠道的模型 + 路由目标模型),给会探模型的客户端用
 function modelList() {
@@ -939,7 +942,7 @@ function proxyHandler(req, res) {
       const creq = transport.request({
         protocol: upstream.protocol, hostname: upstream.hostname,
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
-        path: upstream.pathname.replace(/\/+$/, '') + upstreamPathOf(wire, ep),
+        path: joinUpstreamPath(upstream.pathname, upstreamPathOf(wire, ep)),
         method: 'POST', headers,
         timeout: UPSTREAM_TIMEOUT_MS,
       }, cres => {
@@ -1195,7 +1198,66 @@ function switchCodexRouter() {
     base_url: ROUTER_URL + '/v1', api_key: ROUTER_TOKEN, wire_api: 'responses',
     model: cur || fallback, keepModel: true });
 }
-const switchRouter = app => (app === 'codex' ? switchCodexRouter() : switchClaudeRouter());
+function switchRouter(app, options = {}) {
+  if (app === 'zcode') return switchZcodeRouter(options);
+  if (app === 'codex') return switchCodexRouter();
+  if (app === 'claude') return switchClaudeRouter();
+  throw zcodeConfig.invalid('未知客户端 app');
+}
+
+const zcodeModelsOf = p => [...new Set([
+  ...(Array.isArray(p.models) ? p.models : []), p.model,
+  ...Object.values(p.slots || {}),
+].filter(m => typeof m === 'string' && m.trim()).map(m => m.trim()))];
+
+function zcodeSpec(p) {
+  const app = providerApp(p.id);
+  if (!app) throw zcodeConfig.invalid('渠道不存在');
+  if (p.enabled === false) throw zcodeConfig.invalid('渠道已停用，无法注册 ZCode');
+  if (!p.api_key) throw zcodeConfig.invalid('渠道未配置 API Key');
+  const models = zcodeModelsOf(p);
+  if (!models.length) throw zcodeConfig.invalid('渠道没有可用模型，无法注册 ZCode');
+  const wire = wireOf(p, app);
+  return { target: p.id, base_url: zcodeConfig.baseURL(p.base_url, wire), api_key: p.api_key,
+    wire_api: wire, models, model: models[0] };
+}
+
+function zcodeRouterSpec(options = {}) {
+  if (!zcodeConfig.isObject(options)) throw zcodeConfig.invalid('请求体必须是 JSON 对象');
+  const wire = options.wire_api === undefined ? 'anthropic' : options.wire_api;
+  if (typeof wire !== 'string' || !Object.hasOwn(zcodeConfig.KINDS, wire)) throw zcodeConfig.invalid('wire_api 必须是 anthropic、responses 或 chat');
+  if (options.model !== undefined && (typeof options.model !== 'string' || !options.model.trim()))
+    throw zcodeConfig.invalid('model 必须是非空字符串');
+  const app = wire === 'anthropic' ? 'claude' : 'codex';
+  // Responses can use either OpenAI upstream via the existing responses→chat adapter.
+  const usable = p => p && p.enabled !== false && p.api_key &&
+    (wire !== 'chat' || wireOf(p, app) === 'chat');
+  const models = new Set(storeOf(app).filter(usable).flatMap(zcodeModelsOf));
+  // Explicit route/pool model overrides are real configured models too. Never
+  // synthesize IDs from substring match patterns (e.g. "opus, sonnet").
+  for (const r of [...routes.rules, routes.default || {}]) {
+    if (r.enabled === false || !ruleBelongsToApp(r, app)) continue;
+    for (const member of poolMembers(r, app)) {
+      if (usable(member.provider) && typeof member.model === 'string' && member.model.trim()) models.add(member.model.trim());
+    }
+  }
+  if (!models.size) throw zcodeConfig.invalid('对应协议没有已启用渠道的可用模型');
+  const model = options.model === undefined ? [...models][0] : options.model.trim();
+  if (!models.has(model)) throw zcodeConfig.invalid('model 不在对应协议的可用模型列表中');
+  return { target: ROUTER_ID, base_url: zcodeConfig.baseURL(ROUTER_URL, wire), api_key: ROUTER_TOKEN,
+    wire_api: wire, models: [...models], model };
+}
+
+function switchZcode(p) { zcodeConfig.writeConfig(zcodeSpec(p)); }
+function switchZcodeRouter(options = {}) { zcodeConfig.writeConfig(zcodeRouterSpec(options)); }
+function liveZcodeState() {
+  return zcodeConfig.liveState(meta => {
+    if (!current.zcode || current.zcode !== meta.target) return null;
+    if (current.zcode === ROUTER_ID) return zcodeRouterSpec({ wire_api: meta.wire_api, model: meta.model });
+    const p = findProvider(current.zcode);
+    return p ? zcodeSpec(p) : null;
+  }, ROUTER_URL);
+}
 
 // 读取客户端当前实际生效的上游(与渠道库比对,给 UI 显示"配置漂移"用)
 const trimSlash = s => String(s || '').replace(/\/+$/, '');
@@ -1227,6 +1289,7 @@ function liveState() {
       ? (current.codex === ROUTER_ID
         || !!(curCodex && trimSlash(curCodex.base_url) === ROUTER_URL + '/v1' && curCodex.api_key && sec && sec[0].includes(tomlStr(curCodex.api_key))))
       : !!(curCodex && provider === 'mixr-' + curCodex.id && curCodex.api_key && sec && sec[0].includes(tomlStr(curCodex.api_key))) };
+  live.zcode = liveZcodeState();
   return live;
 }
 
@@ -1294,6 +1357,14 @@ function apiHandler(req, res) {
     req.on('error', bad);
   });
 
+  const readObject = async () => {
+    let body;
+    try { body = JSON.parse((await readBody()) || '{}'); }
+    catch { throw zcodeConfig.invalid('请求体不是合法 JSON'); }
+    if (!zcodeConfig.isObject(body)) throw zcodeConfig.invalid('请求体必须是 JSON 对象');
+    return body;
+  };
+
   Promise.resolve().then(async () => {
     // ---- 状态
     if (req.method === 'GET' && p === '/api/state') {
@@ -1307,7 +1378,7 @@ function apiHandler(req, res) {
         cooldowns: Object.entries(cooldowns).map(([id, until]) => ({ provider: id, until, name: (findProvider(id) || {}).name || id })),
         session_ttl_min: Math.round(SESSION_TTL_MS / 60000), cooldown_s: Math.round(COOLDOWN_MS / 1000),
         router: { id: ROUTER_ID, url: ROUTER_URL, token: ROUTER_TOKEN,
-          claude_base: ROUTER_URL, codex_base: ROUTER_URL + '/v1',
+          claude_base: ROUTER_URL, codex_base: ROUTER_URL + '/v1', zcode_base: ROUTER_URL,
           endpoints: ENDPOINTS.map(e => `${e.app === 'claude' ? 'Anthropic' : 'OpenAI'} ${e.path}`) },
       });
     }
@@ -1349,14 +1420,17 @@ function apiHandler(req, res) {
     }
     // ---- 渠道 CRUD(app = claude | codex)
     if (req.method === 'POST' && p === '/api/providers') {
-      const b = JSON.parse((await readBody()) || '{}');
-      const app = b.app === 'codex' ? 'codex' : 'claude';
+      const b = await readObject();
+      if (b.app !== undefined && !['claude', 'codex'].includes(b.app)) return send(400, { error: '渠道 app 必须是 claude 或 codex' });
+      const app = b.app || 'claude';
+      if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
+      if (b.wire_api !== undefined && !['responses', 'chat'].includes(b.wire_api)) return send(400, { error: 'wire_api 必须是 responses 或 chat' });
       if (!b.name || !b.base_url) return send(400, { error: 'name 与 base_url 必填' });
       if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
       if (app === 'codex' && !b.model) return send(400, { error: 'Codex 渠道必须填模型名' });
       const id = (app === 'codex' ? 'c' : 'p') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const prov = { id, name: String(b.name), base_url: String(b.base_url).replace(/\/+$/, ''),
-        api_key: String(b.api_key || ''), enabled: true,
+        api_key: String(b.api_key || ''), enabled: b.enabled !== false,
         note: String(b.note || ''), created_at: new Date().toISOString() };
       if (app === 'claude') {
         prov.models = Array.isArray(b.models) ? b.models : String(b.models || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1377,7 +1451,10 @@ function apiHandler(req, res) {
       const prov = findProvider(m[1]);
       if (!prov) return send(404, { error: '渠道不存在' });
       if (req.method === 'PUT') {
-        const b = JSON.parse((await readBody()) || '{}');
+        const b = await readObject();
+        if (b.app !== undefined && b.app !== providerApp(prov.id)) return send(400, { error: '不能改变渠道所属协议组 app' });
+        if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
+        if (b.wire_api !== undefined && !['responses', 'chat'].includes(b.wire_api)) return send(400, { error: 'wire_api 必须是 responses 或 chat' });
         if (b.name !== undefined) prov.name = String(b.name);
         if (b.base_url !== undefined) {
           if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
@@ -1402,6 +1479,7 @@ function apiHandler(req, res) {
         const app = providerApp(prov.id);
         store[app] = store[app].filter(x => x.id !== prov.id);
         if (current[app] === prov.id) current[app] = null;
+        if (current.zcode === prov.id) current.zcode = null;
         saveStore();
         return send(200, { ok: true });
       }
@@ -1420,11 +1498,16 @@ function apiHandler(req, res) {
     if (req.method === 'POST' && m) {
       const prov = findProvider(m[1]);
       if (!prov) return send(404, { error: '渠道不存在' });
-      const app = providerApp(prov.id);
+      const b = await readObject();
+      const group = providerApp(prov.id);
+      if (b.app !== undefined && !['claude', 'codex', 'zcode'].includes(b.app)) return send(400, { error: '未知客户端 app' });
+      const app = b.app === undefined ? group : b.app;
+      if (app !== 'zcode' && app !== group) return send(400, { error: '客户端与渠道协议组不兼容' });
       if (!prov.api_key) return send(400, { error: '渠道未配置 API Key,无法切换' });
       try {
-        if (app === 'claude') switchClaude(prov); else switchCodex(prov);
-      } catch (e) { return send(500, { error: '写入配置失败: ' + e.message }); }
+        if (app === 'zcode') switchZcode(prov);
+        else if (app === 'claude') switchClaude(prov); else switchCodex(prov);
+      } catch (e) { return send(e.statusCode || 500, { error: app === 'zcode' && !e.statusCode ? '写入 ZCode 配置失败，请检查配置格式、权限及自有 provider 冲突' : '写入配置失败: ' + e.message }); }
       current[app] = prov.id;
       saveStore();
       return send(200, { ok: true, app, live: liveState()[app] });
@@ -1433,10 +1516,13 @@ function apiHandler(req, res) {
     // ---- 路由模式:把客户端整体指向本机代理(此后流量按路由规则分发)
     m = p.match(/^\/api\/router\/([^/]+)$/);
     if (req.method === 'POST' && m) {
-      const app = m[1] === 'codex' ? 'codex' : 'claude';
+      const app = m[1];
+      if (!['claude', 'codex', 'zcode'].includes(app)) return send(400, { error: '未知客户端 app' });
+      const b = await readObject();
+      if (b.app !== undefined && b.app !== app) return send(400, { error: 'app 与路径不一致' });
       if (app === 'codex' && !store.codex.length) return send(400, { error: '还没有 Codex 组渠道,先添加渠道再切路由模式' });
       if (app === 'claude' && !store.claude.length) return send(400, { error: '还没有 Claude 组渠道,先添加渠道再切路由模式' });
-      try { switchRouter(app); } catch (e) { return send(500, { error: '写入配置失败: ' + e.message }); }
+      try { switchRouter(app, b); } catch (e) { return send(e.statusCode || 500, { error: app === 'zcode' && !e.statusCode ? '写入 ZCode 配置失败，请检查配置格式、权限及自有 provider 冲突' : '写入配置失败: ' + e.message }); }
       current[app] = ROUTER_ID;
       saveStore();
       return send(200, { ok: true, app, live: liveState()[app] });
@@ -1455,7 +1541,7 @@ function apiHandler(req, res) {
       const key = decodeURIComponent(ms[1]);
       const s = sessions.get(key);
       if (!s) return send(404, { error: '会话不存在(可能已过期)' });
-      const b = JSON.parse((await readBody()) || '{}');
+      const b = await readObject();
       const id = String(b.provider || '');
       if (id) {
         const group = storeOf(s.app || 'claude');
@@ -1483,8 +1569,10 @@ function apiHandler(req, res) {
 
     // ---- 路由
     if (req.method === 'PUT' && p === '/api/routes') {
-      const b = JSON.parse((await readBody()) || '{}');
+      const b = await readObject();
       if (!Array.isArray(b.rules)) return send(400, { error: 'rules 必须是数组' });
+      if ([...b.rules, b.default || {}].some(r => r && r.app !== undefined && !['', 'claude', 'codex'].includes(r.app)))
+        return send(400, { error: '路由 app 必须是 claude、codex 或留空，ZCode 复用协议组' });
       routes = { rules: b.rules.map(normalizeRule), default: normalizeRule(b.default || {}) };
       saveRoutes();
       pools = {}; // 规则变了,轮转游标作废
@@ -1501,7 +1589,7 @@ function apiHandler(req, res) {
     }
     if (req.method === 'GET' && p === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end('{"ok":true}'); }
     send(404, { error: 'not found' });
-  }).catch(e => { try { send(500, { error: e.message }); } catch {} });
+  }).catch(e => { try { send(e.statusCode || 500, { error: e.message }); } catch {} });
 }
 
 // ---------------------------------------------------------------- 启动
@@ -1531,6 +1619,7 @@ module.exports = {
   VERSION, proxyHandler, apiHandler, listen,
   resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl,
   switchClaude, switchCodex, switchClaudeRouter, switchCodexRouter, switchRouter,
+  switchZcode, switchZcodeRouter, zcodeSpec, zcodeRouterSpec, liveZcodeState, joinUpstreamPath,
   liveState, testProvider, codexTopLevel, writeCodexConfig,
   // v3 会话分发
   sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, poolMembers, ruleBelongsToApp,
