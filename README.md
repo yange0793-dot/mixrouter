@@ -7,7 +7,8 @@
 本地模型路由器 + 客户端配置切换器,一个进程同时吃两种协议:
 
 - **Claude Code(Anthropic 协议)`/v1/messages` + Codex(OpenAI 协议)`/v1/responses`**
-  都由 :8787 统一路由;chat 系网关(`/v1/chat/completions`)由代理自动翻译
+  都由 :8787 统一路由;chat 系网关(`/v1/chat/completions`)由代理自动翻译,
+  **只挂 Codex 型通道的模型也能直接给 Claude Code 用**(渠道标 `wire_api: responses`,进程内双向转换)
 - **同一个 Agent 的多个对话可以走不同渠道(key)**:Claude Code 带 `x-claude-code-session-id`,
   Codex 带 `session-id`/`thread-id`(body 里是 `prompt_cache_key`),代理以它为「对话」身份,
   把渠道池的成员按会话粘性分配——开三个对话就是三个渠道的 key 在并发,
@@ -69,6 +70,26 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
   二次切换会清掉旧的 mixr section 不留垃圾。
 - **Claude.app 桌面端的配置永远不碰**(见旧训)。
 
+### 常驻(可选,launchd)
+
+想要「开机常驻 + 崩了自愈」,放一个 LaunchAgent(`~/Library/LaunchAgents/com.<用户名>.mixrouter.plist`)
+指向仓库里的 `scripts/launchd-run.sh` 即可:
+
+```xml
+<key>ProgramArguments</key><array>
+  <string>/bin/sh</string><string>/绝对路径/mixrouter/scripts/launchd-run.sh</string>
+</array>
+<key>WorkingDirectory</key><string>/绝对路径/mixrouter</string>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+```
+
+- 脚本先写 `.run/mixrouter.pid` 再 `exec`(exec 不换 PID),所以 `mixctl status|stop` 认的是同一个进程,
+  launchd 起和手动起不是两套状态;
+- 正常退出(exit 0)不会被拉起,`mixctl stop` 停得住;非正常退出(如 `kill -9`)由 launchd 在几秒内自愈;
+- `mixctl start` 检测到本机装了 `*.mixrouter.plist` 就直接 `launchctl kickstart`,不额外派生野进程;
+- 节点路径:脚本先找 `PATH` 里的 node,再兜底 `~/.nvm/versions/node/*/bin/node`。
+
 ## 路由模式(让客户端走代理)
 
 渠道列表右上角的 **⇄ 路由模式** 按钮把客户端整体指到本机代理,此后请求按「路由」页的规则分发到不同渠道;
@@ -128,6 +149,18 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 ./mixctl route claude --slots   # 切路由模式并同时写入槽位 env
 ```
 
+## 多 Key 渠道(同一渠道多账号)
+
+同一个 provider 底下有多把 key(多账号、多额度池)时,不必再建重复渠道:
+
+- 渠道里存一份 **Key 清单**(`keys: [{id, label, key}]`)+ 一个**生效 Key**(`active_key`);
+  转发、渠道测试、「切换」写客户端用的永远是生效那把(`api_key` 与它恒等,老路径一行没改)。
+- 控制台渠道卡片的「API key」是一颗下拉:点一下即切账号,立即生效,不用重启。
+- 编辑弹窗里可增删改 Key(已有的留空=不改;同一把 Key 只存一条);控制台只拿得到掩码,明文不出网。
+- **与子代理槽位联动**:槽位的「渠道」选项显示所绑渠道当前生效的账号名——在渠道库里切了账号,
+  上面槽位那一行跟着变;槽位绑的是渠道,换 Key 不需要重选槽位。
+- 直连模式下换 Key 会与客户端配置漂移,点一下「重新写入」同步即可;路由模式下不用管。
+
 ## 会话级渠道分发(v3 核心)
 
 想让同一个 Agent 里**不同的对话用不同渠道的 key**(比如 A 对话烧 AgentRouter、B 对话烧另一个中转),
@@ -173,6 +206,23 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 > 对话标签取自 Claude 的 system prompt 工作目录 / Codex 的首条用户消息(跳过
 > `<environment_context>` 一类注入块),**只存在内存里,不写进请求日志**;不需要可用 `MIXR_SESSION_LABEL=0` 关闭。
 
+## Claude 组渠道走 Responses(v3.3)
+
+有些网关把模型只挂在 **Codex(Responses)型通道**上,Anthropic 的 `/v1/messages` 直接回
+「不支持所选模型」(实测:anyrouter 的 `gpt-6-astra`)。这类模型以前只能在本机再挂一个转换代理,
+现在给渠道标一个开关就行:
+
+- 渠道 `wire_api: "responses"`(控制台编辑弹窗里选「Responses」)→ mixrouter 在**自己进程内**翻译:
+  请求方向 `system→instructions`、`tool_use→function_call`、`tool_result→function_call_output`、
+  图片→`input_image`、`max_tokens→max_output_tokens`;响应方向把 Responses 的 JSON/SSE 译回
+  Anthropic 的 `message` / `message_start…message_stop`(reasoning 事件丢弃,usage 穿过翻译层)。
+- 顺带按真实 Codex 客户端的样子补齐这类通道的形状要求:`include:["reasoning.encrypted_content"]`、
+  非空 `prompt_cache_key`、`store:false`,UA 换成 `codex_cli_rs/…`。
+- **同一渠道内自愈**:上游 5xx/429 且还没写出任何字节时,先轮换一代 `prompt_cache_key` 重试
+  (这类网关按它做渠道亲和,坏渠道会被钉住一小时),次数(`MIXR_CONV_RETRIES`,默认 3)用完才换池里的下一个渠道。
+- `count_tokens` 在这类上游没有对应端点,mixrouter 本地按请求体积估一个 `input_tokens` 回去。
+- 其余行为不变:`[1M]` 后缀照剥、会话粘性照旧、响应仍带 `x-mixrouter-provider` 等标头。
+
 ## Codex 走代理(v3.1)
 
 Codex 只说 `/v1/responses`(0.153 起 `wire_api = "chat"` 已被上游客户端移除),所以代理做两件事:
@@ -201,7 +251,11 @@ Codex 只说 `/v1/responses`(0.153 起 `wire_api = "chat"` 已被上游客户端
   写成对象可各自指定目标模型与权重:`[{"provider":"p1","model":"claude-opus-5","weight":2},{"provider":"p2"}]`。
   Codex 渠道自带模型名(`provider.model`),池成员/规则没写目标模型时就用它。
 - `when` 附加匹配条件(**全部**满足才命中,均为子串):`session`(会话 id)、`ua`(客户端 UA)、
-  `token`(客户端带来的凭据)。例:给某几个对话开小灶,或让不同工具走不同渠道。
+  `token`(客户端带来的凭据)、`body`(请求体内容)。例:给某几个对话开小灶,或让不同工具走不同渠道。
+- **`when.body` = 内容分流**:带 `when.body` 的规则先于槽位别名与普通规则评估,
+  用来把"模型名相同、性质不同"的请求分开(典型:Claude Code 的上下文压缩请求走的还是主模型别名,
+  请求体里带着固定的摘要提示词)。`match` 留空的 `when.body` 规则不限模型。
+  命中的请求不参与会话粘性——只代表这一条请求走那条路,不代表这个对话换了渠道。
 - 目标模型留空 = 透传请求模型;带 `[1M]` 后缀 = 自动剥离并附加
   `anthropic-beta: context-1m-2025-08-07` 头(仅 Claude 通路)。
 - 渠道可配自定义 UA(优先级:渠道 UA > 客户端 UA > 兜底);
@@ -232,6 +286,9 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
     池成员独立目标模型、失败转移(连不上 / 5xx)与重绑、冷却与全冷却兜底、手动钉定压过策略、
     `priority` 与 `when.session/ua/token`、default 配池、会话 API(列表/改绑/解绑)、
     向后兼容老格式规则、密钥不出现在会话数据里。
+  - **Claude 组走 Responses v3.3**:Anthropic→Responses 请求映射(system/工具/图片/tool_use/tool_result)、
+    Responses→Anthropic 响应映射与 tool_use 收尾、SSE 事件序列翻译、上游整包 JSON 时摊成 Anthropic SSE、
+    `count_tokens` 本地估算、上游 5xx 时轮换 `prompt_cache_key` 重试、渠道 API 的 wire_api 校验。
   - **Codex 通路 v3.1**:responses 直通(路径/鉴权/UA/会话 id 透传/usage)、responses→chat 翻译
     (请求形状、SSE 事件顺序、工具调用翻译、usage 穿过翻译层)、chat 端点直通与 `wire_api_mismatch_error`、
     Codex 池会话粘性、失败转移、OpenAI 形状错误体、分组规则互不干扰、Codex 会话只能绑 Codex 组渠道、
@@ -239,6 +296,9 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
 - **真机端到端**(2026-09-10,真实 `claude` CLI 2.1.267 打本地 mock 上游,零成本):
   三个独立对话分别落到三个渠道的三个不同 key;`--continue` 续聊保持同一会话 id 与原渠道;
   手动改绑后下一个请求立即改道。
+- **真机端到端**(2026-09-13,真实 anyrouter `gpt-6-astra`,该模型只在 Codex 型通道上):
+  Claude 组渠道标 `wire_api: responses` 后,非流式、流式、以及工具调用(模型回 `tool_use`,
+  `stop_reason: tool_use`)全部走通,主/副槽位实测 200——本机原先那个 18700 转换代理已退役。
 - **真机端到端**(2026-09-11,真实 `codex` CLI 0.154.0 打本地 mock 上游,零成本):
   两个 `codex exec` 对话分别落到两个 responses 渠道;`codex exec resume --last` 续聊保持同一
   session id 与原渠道(sticky);`-m glm-5.3-flash` 命中 chat 协议渠道,代理翻译后 Codex 正常收流
@@ -264,7 +324,9 @@ npm test                 # node --test test/*.test.js
   渠道池四策略 + 会话粘性、失败转移与冷却、priority/when 路由条件、会话视图与手动改绑
 - [x] [v3.1 Codex 组走代理](https://github.com/yange0793-dot/mixrouter/issues/5) — OpenAI 端点
   (`/v1/responses`、`/v1/chat/completions`)、Codex 会话粘性、responses⇄chat 协议翻译、一键路由模式
-- [ ] 跨组翻译(Codex 请求 → Claude 组渠道,反向亦然):让两组渠道互为备份,尚未实现
+- [x] **v3.3 Claude 组渠道走 Responses** — 渠道标 `wire_api: responses`,Claude Code 直接吃只挂
+  Codex 型通道的模型(如 anyrouter `gpt-6-astra`);进程内双向转换 + 同渠道 key 轮换重试,免本地转换代理
+- [ ] 反向补齐(Claude 组渠道只开 chat 系上游时的翻译):尚未实现
 
 ## License
 

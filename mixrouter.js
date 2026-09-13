@@ -21,8 +21,9 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
+const wireResponses = require('./lib/wire-responses');
 
-const VERSION = '3.2.3';
+const VERSION = '3.3.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -61,6 +62,22 @@ const SESSION_MAX = Number(process.env.MIXR_SESSION_MAX || 1000);
 const COOLDOWN_MS = Number(process.env.MIXR_COOLDOWN_SEC || 60) * 1000;
 // 单次请求最多尝试几个渠道(池很大时兜住尾延迟)
 const MAX_ATTEMPTS = Number(process.env.MIXR_MAX_ATTEMPTS || 3);
+// Claude 组渠道翻成 Responses 后,同一渠道内的重试次数(轮换 prompt_cache_key 用)
+const CONV_RETRIES = Number(process.env.MIXR_CONV_RETRIES || 3);
+
+// Responses 型的 Codex 通道会用 prompt_cache_key 做渠道亲和(TTL 1 小时),坏渠道
+// 一旦钉上就整小时失败。key 按会话稳定(拿得到上游 prompt cache),失败时 +1 代。
+const convCacheGens = new Map();
+const convCacheBase = (sessionKey, providerId) => (`${providerId}-${sessionKey || 'anon'}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'mixrouter');
+const convCacheKey = (sessionKey, providerId, gen) => (gen ? `${convCacheBase(sessionKey, providerId)}-g${gen}` : convCacheBase(sessionKey, providerId));
+function rotateConvCacheGen(sessionKey, providerId) {
+  const k = providerId + '\u0000' + (sessionKey || 'anon');
+  if (convCacheGens.size > SESSION_MAX) convCacheGens.clear();
+  const gen = ((convCacheGens.get(k) || 0) + 1) % 50;
+  convCacheGens.set(k, gen);
+  return gen;
+}
+const convCacheGen = (sessionKey, providerId) => convCacheGens.get(providerId + '\u0000' + (sessionKey || 'anon')) || 0;
 // 会话标签(从 system prompt 的工作目录 / 首条用户消息取,便于控制台认出是哪个对话);置 0 关闭
 const SESSION_LABEL = process.env.MIXR_SESSION_LABEL !== '0';
 const STRATEGIES = ['round_robin', 'weighted', 'least_used', 'random', 'priority'];
@@ -233,7 +250,7 @@ function normalizeRule(r) {
     })
     .filter(Boolean);
   const when = {};
-  for (const f of ['session', 'ua', 'token']) {
+  for (const f of ['session', 'ua', 'token', 'body']) {
     if (src.when && src.when[f]) when[f] = String(src.when[f]).trim();
   }
   const p = Number(src.priority);
@@ -590,14 +607,36 @@ function todayStats() {
 // 路由目标来自哪一组由端点决定:Anthropic 端点取 Claude 组,OpenAI 端点取 Codex 组
 function matchWhen(rule, ctx) {
   const w = (rule && rule.when) || {};
-  for (const field of ['session', 'ua', 'token']) {
+  for (const field of ['session', 'ua', 'token', 'body']) {
     const want = String(w[field] || '').trim().toLowerCase();
     if (!want) continue;
-    if (!String((ctx && ctx[field]) || '').toLowerCase().includes(want)) return false;
+    // body 只在真有规则要匹配时才由调用方拼出来(压缩这类请求体可以到上百 KB)
+    const have = field === 'body'
+      ? (typeof ctx.bodyText === 'function' ? ctx.bodyText() : '')
+      : (ctx && ctx[field]) || '';
+    if (!String(have).toLowerCase().includes(want)) return false;
   }
   return true;
 }
 function resolveRoute(modelIn, ctx = {}, app = 'claude') {
+  const m = String(modelIn || '').toLowerCase();
+  const order = routes.rules
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => ((Number(b.r.priority) || 0) - (Number(a.r.priority) || 0)) || (a.i - b.i));
+  // 内容分流:带 when.body 的规则按请求内容命中,先于槽位别名与普通规则评估。
+  // 同一个模型名底下可能干着不同的事(Claude Code 的压缩请求走的还是主模型别名),
+  // 只有请求体认得出来;match 留空 = 不限模型。
+  for (const { r } of order) {
+    if (!r.enabled || !String((r.when && r.when.body) || '').trim()) continue;
+    if (!ruleBelongsToApp(r, app)) continue;
+    if (!matchWhen(r, ctx)) continue;
+    const hits = String(r.match || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (hits.length && !hits.some(h => m.includes(h))) continue;
+    const members = poolMembers(r, app);
+    return { rule: r, members, content: true,
+      provider: members.length ? members[0].provider : null,
+      model: (members.length ? members[0].model : r.model) || modelIn, strategy: strategyOf(r) };
+  }
   // 槽位别名精确匹配,优先于一切规则(客户端槽位 env 写的就是别名,不能被子串规则截胡)
   const slot = resolveSlot(app, modelIn);
   if (slot) {
@@ -606,10 +645,6 @@ function resolveRoute(modelIn, ctx = {}, app = 'claude') {
       provider: members.length ? members[0].provider : null,
       model: (members.length ? members[0].model : slot.model) || modelIn, strategy: 'round_robin' };
   }
-  const m = String(modelIn || '').toLowerCase();
-  const order = routes.rules
-    .map((r, i) => ({ r, i }))
-    .sort((a, b) => ((Number(b.r.priority) || 0) - (Number(a.r.priority) || 0)) || (a.i - b.i));
   for (const { r } of order) {
     if (!r.enabled) continue;
     const hits = String(r.match || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -914,9 +949,12 @@ function classifyProxyRequest(req) {
   for (const e of ENDPOINTS) if (e.re.test(p)) return e;
   return null;
 }
-// 本渠道对这次请求该说哪种协议:Claude 组固定 Anthropic;Codex 组按渠道的 wire_api
-// (都是 responses:原样转发;chat:只开 completions 的网关,由代理现场翻译)
-const wireOf = (provider, app) => app === 'claude' ? 'anthropic' : (provider.wire_api === 'chat' ? 'chat' : 'responses');
+// 本渠道对这次请求该说哪种协议:Claude 组默认 Anthropic,标了 wire_api='responses'
+// 的渠道(只挂 Codex 型通道的模型,如 anyrouter 的 gpt-6-astra)由代理现场翻译;
+// Codex 组按渠道的 wire_api(都是 responses:原样转发;chat:只开 completions 的网关,由代理现场翻译)
+const wireOf = (provider, app) => app === 'claude'
+  ? (provider.wire_api === 'responses' ? 'responses' : 'anthropic')
+  : (provider.wire_api === 'chat' ? 'chat' : 'responses');
 const upstreamPathOf = (wire, ep) => wire === 'anthropic' ? ep.path : (wire === 'chat' ? '/v1/chat/completions' : '/v1/responses');
 // Channel bases may already end in /v1. Keep custom prefixes, append the version once.
 const joinUpstreamPath = (pathname, endpoint) => pathname.replace(/\/+$/, '').replace(/\/v1$/, '') + endpoint;
@@ -980,8 +1018,11 @@ function proxyHandler(req, res) {
     const modelIn = body.model || '';
     const ident = sessionIdentity(req, body, ep.app);
     const label = sessionLabel(body, ep.app);
+    // 只有存在 when.body 规则时才会真拼这段文本(压缩请求体上百 KB,没规则就不白拼)
+    let bodyLower;
+    const bodyText = () => bodyLower ?? (bodyLower = Buffer.concat(chunks).toString('utf8').toLowerCase());
     const resolved = resolveRoute(modelIn, {
-      session: ident.key, ua: req.headers['user-agent'], token: clientToken(req),
+      session: ident.key, ua: req.headers['user-agent'], token: clientToken(req), bodyText,
     }, ep.app);
     // 单一目标停用 → 明确分型(池会自动跳过停用成员,不会落到这)
     if (resolved.members.length === 1 && resolved.members[0].provider.enabled === false)
@@ -1001,7 +1042,10 @@ function proxyHandler(req, res) {
       : `模型 "${modelIn}" 没有匹配的路由,或路由未绑定 Claude 渠道。请在控制台 http://127.0.0.1:${UI_PORT} 配置路由`);
 
     // 本会话锁定的渠道优先,其余池成员依次作后备(只在还没给客户端写字节时才会换)
-    const target = resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind, ep.app);
+    // 内容分流命中的请求不参与会话粘性:它只代表"这一条请求"走那条路,不代表对话换了渠道
+    const target = resolved.content
+      ? { member: members[0], sticky: false, rebind: false }
+      : resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind, ep.app);
     const sess = sessionEntry(ident.key, ident.kind, members, label, ep.app);
     const wasSticky = target.sticky && !target.rebind;
     const ordered = [target.member]
@@ -1009,6 +1053,9 @@ function proxyHandler(req, res) {
       .slice(0, Math.max(1, MAX_ATTEMPTS));
 
     const started = Date.now();
+    const rawLen = chunks.reduce((n, c) => n + c.length, 0);
+    // 转换到 responses 上游时,同一渠道内允许的轮换重试次数(见 CONV_RETRIES)
+    let convRetries = 0;
     const entry = { ts: new Date().toISOString(), app: ep.app, provider: '', model_in: modelIn, model_out: '',
       session: sessionKeyOf(ident.key), session_kind: ident.kind, rule: (resolved.rule && resolved.rule.id) || 'default',
       pool: members.length, strategy: resolved.strategy, sticky: wasSticky, attempts: 0, failover: false,
@@ -1037,11 +1084,33 @@ function proxyHandler(req, res) {
       const member = ordered[i];
       const provider = member.provider;
       const wire = wireOf(provider, ep.app);
+      // claude 客户端落到 responses 型渠道:本进程内翻译(lib/wire-responses.js)
+      const conv = wire === 'responses' && ep.kind === 'messages';
+      const sessKey = sessionKeyOf(ident.key);
+      // count_tokens 在 responses 线上没有对应端点,本地按体积估一个(与旧转换代理同口径)
+      if (ep.kind === 'count_tokens' && wire !== 'anthropic') {
+        entry.attempts = i + 1; entry.provider = provider.name;
+        entry.model_out = member.model || modelIn; entry.wire = wire; entry.status = 200;
+        entry.in = Math.max(1, Math.ceil(rawLen / 4));
+        finalize();
+        if (res.headersSent) return;
+        res.writeHead(200, {
+          'Content-Type': 'application/json', 'x-mixrouter-app': ep.app,
+          'x-mixrouter-provider': safeHeader(provider.name), 'x-mixrouter-model': safeHeader(member.model || modelIn),
+          'x-mixrouter-session': safeHeader(sessKey),
+        });
+        return res.end(JSON.stringify({ input_tokens: entry.in }));
+      }
       const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, body.stream !== false);
-      // [1M] 后缀与 beta 头只对 Anthropic 上游有意义
-      const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : (member.model || modelIn);
+      // [1M] 后缀与 beta 头只对 Anthropic 上游有意义;Responses 上游收的是裸名
+      const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : wireResponses.stripModelSuffix(member.model || modelIn);
+      const convKey = conv ? convCacheKey(sessKey, provider.id, convCacheGen(sessKey, provider.id)) : '';
+      // 上游是 Codex 型通道时按 Codex 客户端的样子说话(claude-cli 的 UA 会被这类网关另眼看待)
+      if (conv) headers['User-Agent'] = safeHeader(provider.ua) || DEFAULT_UA_CODEX;
       const outBody = (wire === 'chat' && ep.kind === 'responses')
         ? JSON.stringify(responsesToChat({ ...body, model }, provider))
+        : conv
+        ? JSON.stringify(wireResponses.anthropicToResponses({ ...body, model }, { promptCacheKey: convKey }))
         : JSON.stringify({ ...body, model });
       entry.attempts = i + 1;
       entry.provider = provider.name;
@@ -1066,17 +1135,20 @@ function proxyHandler(req, res) {
         timeout: UPSTREAM_TIMEOUT_MS,
       }, cres => {
         if (done) return;
-        // 上游整体性故障(5xx / 限流)时,趁还没给客户端写任何字节,换下一个渠道
-        if ((cres.statusCode >= 500 || cres.statusCode === 429) && i + 1 < ordered.length) {
+        // 上游整体性故障(5xx / 限流)时,趁还没给客户端写任何字节重来:
+        // 转换场景先在同一个渠道里换一代 prompt_cache_key(坏上游渠道会被亲和钉住),
+        // 次数用完再换池里的下一个渠道
+        if ((cres.statusCode >= 500 || cres.statusCode === 429) && ((conv && convRetries < CONV_RETRIES) || i + 1 < ordered.length)) {
           done = true;
           cres.resume(); // 排水丢弃,避免占住 socket
+          if (conv && convRetries < CONV_RETRIES) { convRetries++; rotateConvCacheGen(sessKey, provider.id); return tryCandidate(i); }
           return nextOrFail(cres.statusCode, '');
         }
         done = true;
         entry.status = cres.statusCode;
         entry.sticky = wasSticky && !entry.failover;
         // 落到这个渠道就把它记进会话(含失败转移后重新绑定),后续请求继续粘它
-        if (cres.statusCode < 400 && (sess.providerId !== provider.id || entry.failover)) {
+        if (cres.statusCode < 400 && !resolved.content && (sess.providerId !== provider.id || entry.failover)) {
           sess.providerId = provider.id; sess.model = model;
           sess.ruleId = (resolved.rule && resolved.rule.id) || 'default';
         }
@@ -1133,6 +1205,57 @@ function proxyHandler(req, res) {
               }
             });
           }
+          return;
+        }
+        // claude 客户端 + responses 上游 = 现场翻译(响应/SSE 翻回 Anthropic,错误也翻成 Anthropic 形状)
+        if (conv) {
+          if (cres.statusCode >= 400) {
+            const parts = [];
+            cres.on('data', c => parts.push(c));
+            cres.on('end', () => {
+              const text = Buffer.concat(parts).toString('utf8');
+              finishEntry();
+              if (res.headersSent) { try { res.end(); } catch {} return; }
+              let msg = text;
+              try {
+                const j = JSON.parse(text);
+                const e = j.error;
+                msg = (e && (e.message || (typeof e === 'string' ? e : JSON.stringify(e)))) || j.message || text;
+              } catch {}
+              res.writeHead(cres.statusCode, { ...outHeaders, 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(msg).slice(0, 400) } }));
+            });
+            return;
+          }
+          if (isSse) {
+            wireResponses.relayAnthropicStream(cres, res, model, {
+              mayRetry: !res.headersSent && convRetries < CONV_RETRIES, headers: outHeaders,
+            }).then(r => {
+              if (r && r.retryable) { convRetries++; rotateConvCacheGen(sessKey, provider.id); entry.attempts = i + 1; return tryCandidate(i); }
+              const u = (r && r.usage) || {};
+              finishEntry({
+                in: u.input_tokens || 0, out: u.output_tokens || 0,
+                cache_read: (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0,
+              });
+            });
+            cres.on('close', () => finishEntry());
+            return;
+          }
+          const parts = [];
+          cres.on('data', c => parts.push(c));
+          cres.on('end', () => {
+            const text = Buffer.concat(parts).toString('utf8');
+            let msg = null;
+            try { msg = wireResponses.responsesToAnthropic(JSON.parse(text), model); } catch { /* 非 JSON 原样透传 */ }
+            const u = (msg && msg.usage) || {};
+            finishEntry({ in: u.input_tokens || 0, out: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0 });
+            if (res.headersSent) return;
+            try {
+              // 客户端要流、上游却整包回 JSON:摊成 Anthropic SSE,别让 Claude Code 干等
+              if (msg && body.stream) wireResponses.emitAnthropicSse(res, msg, outHeaders);
+              else { res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' }); res.end(msg ? JSON.stringify(msg) : text); }
+            } catch {}
+          });
           return;
         }
         // 同协议直通:Anthropic→Anthropic / responses→responses / chat→chat
@@ -1474,8 +1597,26 @@ function maskKey(k) {
   return k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '***';
 }
 function publicProvider(p) {
-  const { api_key, ...rest } = p;
-  return { ...rest, key_masked: maskKey(api_key), has_key: !!api_key };
+  const { api_key, keys, ...rest } = p;
+  return { ...rest, key_masked: maskKey(api_key), has_key: !!api_key,
+    keys: (keys || []).map(k => ({ id: k.id, label: k.label, key_masked: maskKey(k.key) })),
+    active_key: (keys || []).some(k => k.id === p.active_key) ? p.active_key : ((keys || [])[0] || {}).id || '' };
+}
+
+// 同一渠道可存多把 Key(同 provider 多账号),切换 = 换生效 Key;api_key 始终等于生效那把,
+// 这样转发、测试、切换客户端这些老路径一行都不用改
+function normalizeKeys(input, prev = []) {
+  const out = [];
+  for (const raw of Array.isArray(input) ? input : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = String(raw.id || '').trim() || ('k' + Math.random().toString(36).slice(2, 8));
+    const old = prev.find(x => x.id === id);
+    const key = String(raw.key || '').trim() || (old ? old.key : '');
+    if (!key) return { error: '每个 Key 都要有值（已有的留空表示不改）' };
+    if (out.some(k => k.key === key)) continue;            // 同一个 Key 只留一条
+    out.push({ id, label: String(raw.label || (old && old.label) || '').trim() || `账号${out.length + 1}`, key });
+  }
+  return { keys: out };
 }
 
 function apiHandler(req, res) {
@@ -1556,7 +1697,8 @@ function apiHandler(req, res) {
       if (b.app !== undefined && !['claude', 'codex'].includes(b.app)) return send(400, { error: '渠道 app 必须是 claude 或 codex' });
       const app = b.app || 'claude';
       if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
-      if (b.wire_api !== undefined && !['responses', 'chat'].includes(b.wire_api)) return send(400, { error: 'wire_api 必须是 responses 或 chat' });
+      if (b.wire_api !== undefined && !(app === 'claude' ? ['anthropic', 'responses'] : ['responses', 'chat']).includes(b.wire_api))
+        return send(400, { error: app === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic 或 responses' : 'wire_api 必须是 responses 或 chat' });
       if (!b.name || !b.base_url) return send(400, { error: 'name 与 base_url 必填' });
       if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
       if (app === 'codex' && !b.model) return send(400, { error: 'Codex 渠道必须填模型名' });
@@ -1568,11 +1710,20 @@ function apiHandler(req, res) {
         prov.models = Array.isArray(b.models) ? b.models : String(b.models || '').split(',').map(s => s.trim()).filter(Boolean);
         prov.slots = normalizeChannelSlots(b.slots);
         prov.ua = String(b.ua || '');
+        // responses:该渠道的模型只挂在 Codex(Responses)型通道上,由本进程翻译
+        if (b.wire_api === 'responses') prov.wire_api = 'responses';
       } else {
         prov.model = String(b.model || '');
         prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
         // 纯文本网关(GLM 一类):把 responses 里的图片换成一句说明,而不是让上游 400
         prov.drop_images = !!b.drop_images;
+      }
+      if (Array.isArray(b.keys) && b.keys.length) {
+        const kr = normalizeKeys(b.keys, []);
+        if (kr.error) return send(400, { error: kr.error });
+        prov.keys = kr.keys;
+        prov.active_key = prov.keys[0].id;
+        prov.api_key = prov.keys[0].key;
       }
       store[app].push(prov);
       saveStore();
@@ -1586,7 +1737,8 @@ function apiHandler(req, res) {
         const b = await readObject();
         if (b.app !== undefined && b.app !== providerApp(prov.id)) return send(400, { error: '不能改变渠道所属协议组 app' });
         if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
-        if (b.wire_api !== undefined && !['responses', 'chat'].includes(b.wire_api)) return send(400, { error: 'wire_api 必须是 responses 或 chat' });
+        if (b.wire_api !== undefined && !(providerApp(prov.id) === 'claude' ? ['anthropic', 'responses'] : ['responses', 'chat']).includes(b.wire_api))
+          return send(400, { error: providerApp(prov.id) === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic 或 responses' : 'wire_api 必须是 responses 或 chat' });
         if (b.name !== undefined) prov.name = String(b.name);
         if (b.base_url !== undefined) {
           if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
@@ -1599,11 +1751,25 @@ function apiHandler(req, res) {
           if (b.models !== undefined) prov.models = Array.isArray(b.models) ? b.models : String(b.models).split(',').map(s => s.trim()).filter(Boolean);
           if (b.slots !== undefined) prov.slots = normalizeChannelSlots(b.slots);
           if (b.ua !== undefined) prov.ua = String(b.ua);
+          if (b.wire_api !== undefined) { if (b.wire_api === 'responses') prov.wire_api = 'responses'; else delete prov.wire_api; }
         } else {
           if (b.model !== undefined) prov.model = String(b.model);
           if (b.wire_api !== undefined) prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
           if (b.drop_images !== undefined) prov.drop_images = !!b.drop_images;
         }
+        // 多 Key(同渠道多账号):keys 是清单,active_key 是当前生效那把,api_key 跟着它走
+        if (b.keys !== undefined) {
+          const kr = normalizeKeys(b.keys, prov.keys || []);
+          if (kr.error) return send(400, { error: kr.error });
+          if (kr.keys.length) prov.keys = kr.keys; else delete prov.keys;
+        }
+        if (b.active_key !== undefined) prov.active_key = String(b.active_key || '');
+        if (Array.isArray(prov.keys) && prov.keys.length) {
+          const act = prov.keys.find(k => k.id === prov.active_key) || prov.keys[0];
+          if (b.api_key) act.key = String(b.api_key).trim();   // 编辑弹窗里改的那把就是当前生效那把
+          prov.active_key = act.id;
+          prov.api_key = act.key;
+        } else delete prov.active_key;
         saveStore();
         return send(200, { ok: true });
       }
@@ -1776,6 +1942,12 @@ if (require.main === module) {
   // 长驻进程兜底:单次请求内的意外异常只记日志,不退出
   process.on('uncaughtException', e => console.error(`[uncaught] ${new Date().toISOString()} ${e.stack || e}`));
   process.on('unhandledRejection', e => console.error(`[unhandled] ${new Date().toISOString()} ${e && (e.stack || e.message) || e}`));
+  // 优雅退出:落盘运行时状态 + 以 0 退出。launchd 的 KeepAlive.SuccessfulExit=false 靠这个区分
+  // 「mixctl stop / launchctl kickstart -k 的正常停止」与「真崩了」,前者不会被立刻重新拉起。
+  for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => {
+    try { saveStore(); saveRoutes(); saveSlots(); } catch {}
+    process.exit(0);
+  });
 }
 
 // 供测试与脚本复用;store/routes/current 经 _state 存取以保持闭包绑定

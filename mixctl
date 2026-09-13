@@ -13,6 +13,15 @@ const PID_FILE = path.join(RUN_DIR, 'mixrouter.pid');
 const SERVER_LOG = path.join(ROOT, 'logs', 'server.log');
 const REQ_LOG = path.join(ROOT, 'logs', 'requests.jsonl');
 const UI_PORT = process.env.MIXUI_PORT || 8788;
+// 常驻由 LaunchAgent 兜:装了它,start 就走 launchd,不另起一个不受监管的野进程。
+// label 按本机实际装的 plist 找(名字形如 *.mixrouter.plist),源码里不写死用户名。
+const LAUNCHD_DIR = path.join(require('os').homedir(), 'Library', 'LaunchAgents');
+function launchdJob() {
+  try {
+    const f = fs.readdirSync(LAUNCHD_DIR).find(n => n.endsWith('.mixrouter.plist'));
+    return f ? { label: path.basename(f, '.plist'), plist: path.join(LAUNCHD_DIR, f) } : null;
+  } catch { return null; }
+}
 
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const getPid = () => { try { return Number(fs.readFileSync(PID_FILE, 'utf8').trim()); } catch { return 0; } };
@@ -35,6 +44,22 @@ function start() {
   if (pid && alive(pid)) return console.log(`mixrouter 已在运行 (pid ${pid}),控制台 http://127.0.0.1:${UI_PORT}`);
   fs.mkdirSync(RUN_DIR, { recursive: true });
   fs.mkdirSync(path.dirname(SERVER_LOG), { recursive: true });
+  // 装了 LaunchAgent 就交给 launchd 拉:崩溃自愈、常驻由它兜,别在外面另起一个不受管的进程
+  const job = launchdJob();
+  if (job) {
+    try {
+      execSync(`launchctl kickstart -k gui/${process.getuid()}/${job.label}`, { stdio: ['ignore', 'ignore', 'pipe'] });
+      const t0 = Date.now();
+      const poll = () => api('/healthz')
+        .then(() => console.log(`mixrouter 已由 launchd 拉起 (${job.label})\n  Claude 代理 http://127.0.0.1:8787/v1/messages\n  Codex  代理 http://127.0.0.1:8787/v1/responses\n  控制台      http://127.0.0.1:${UI_PORT}`))
+        .catch(() => Date.now() - t0 > 6000
+          ? console.log(`已 kickstart ${job.label},但端口未就绪,查看日志: mixctl logs`)
+          : new Promise(r => setTimeout(r, 300)).then(poll));
+      return poll();
+    } catch (e) {
+      console.log(`launchd 拉起失败(${String((e.stderr || e.message || '')).trim().slice(0, 120)}),改为直接派生`);
+    }
+  }
   const out = fs.openSync(SERVER_LOG, 'a');
   const child = spawn(process.execPath, [path.join(ROOT, 'mixrouter.js')], { detached: true, stdio: ['ignore', out, out], env: process.env });
   child.unref();

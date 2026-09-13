@@ -131,6 +131,26 @@ test('代理转发:haiku 槽别名按槽位落点送达上游', async () => {
   assert.ok(r.data.data.some(x => x.id === 'mixr-worker' && x.owned_by === 'slot:worker'));
 });
 
+test('内容分流:when.body 规则把压缩请求从槽位别名上分走,普通请求不受影响', async () => {
+  mod._state.slotMap = { claude: { main: { provider: 'pa', model: 'gpt-6-astra' } }, codex: {} };
+  mod._state.routes = { rules: [
+    { id: 'rcompact', match: '', strategy: 'priority', when: { body: 'detailed summary of the conversation' }, enabled: true,
+      pool: [{ provider: 'pa', model: 'gpt-5.6-sol' }] },
+  ], default: { provider: '', model: '' } };
+  hits.length = 0;
+  // 普通请求:槽位别名照旧落到槽位落点
+  let r = await request(`http://127.0.0.1:${proxyPort()}/v1/messages`, 'POST',
+    { model: 'mixr-main', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200);
+  assert.equal(hits[0].body.model, 'gpt-6-astra');
+  // 压缩请求(请求体带摘要提示词):绕过槽位别名走内容规则
+  r = await request(`http://127.0.0.1:${proxyPort()}/v1/messages`, 'POST',
+    { model: 'mixr-main', max_tokens: 1, messages: [{ role: 'user', content: 'Your task is to create a detailed summary of the conversation so far' }] });
+  assert.equal(r.status, 200);
+  assert.equal(hits[1].body.model, 'gpt-5.6-sol');
+  assert.equal(r.headers['x-mixrouter-model'], 'gpt-5.6-sol');
+});
+
 test('槽位渠道停用/删除:provider_disabled_error 与 no_route_error 分型', async () => {
   mod._state.slotMap = { claude: { haiku: { provider: 'pb', model: 'm-off' } }, codex: {} };
   let r = await request(`http://127.0.0.1:${proxyPort()}/v1/messages`, 'POST',

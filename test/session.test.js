@@ -183,18 +183,24 @@ test('matchWhen:空条件恒真,条件为子串且大小写不敏感', () => {
   assert.strictEqual(matchWhen({ when: { ua: 'CLAUDE-CLI' } }, { ua: 'claude-cli/2.1' }), true);
   // 多个条件必须同时满足
   assert.strictEqual(matchWhen({ when: { ua: 'claude-cli', token: 'tk1' } }, { ua: 'claude-cli/2', token: 'tk2' }), false);
+  // body 条件从 ctx.bodyText() 取文本(没有该函数就当空串,不抛错)
+  assert.strictEqual(matchWhen({ when: { body: 'DETAILED SUMMARY' } }, { bodyText: () => 'create a detailed summary of the conversation' }), true);
+  assert.strictEqual(matchWhen({ when: { body: 'detailed summary' } }, { bodyText: () => 'nothing here' }), false);
+  assert.strictEqual(matchWhen({ when: { body: 'x' } }, {}), false);
+  // body 与其它条件同时给出时为「与」
+  assert.strictEqual(matchWhen({ when: { body: 'summary', ua: 'claude-cli' } }, { ua: 'curl/8', bodyText: () => 'summary' }), false);
 });
 
 test('normalizeRule:补默认值、剔除坏池成员、收敛枚举与类型', () => {
   const r = normalizeRule({
     match: 'opus', pool: ['pa', '', { provider: 'pb', model: 'm1', weight: 3 }, { provider: '' }, 42, { provider: 'pc', weight: -1 }, 'pdead'],
-    strategy: 'nonsense', priority: '7', when: { session: ' s1 ', ua: '', junk: 'x' }, enabled: undefined,
+    strategy: 'nonsense', priority: '7', when: { session: ' s1 ', ua: '', junk: 'x', body: ' detailed summary ' }, enabled: undefined,
   });
   assert.strictEqual(r.strategy, 'round_robin');            // 非法策略回落默认
   assert.strictEqual(r.priority, 7);
   assert.strictEqual(r.enabled, true);
   assert.deepStrictEqual(r.pool, ['pa', { provider: 'pb', model: 'm1', weight: 3 }, { provider: 'pc' }, 'pdead']);
-  assert.deepStrictEqual(r.when, { session: 's1' });        // 只留认识的字段,值 trim
+  assert.deepStrictEqual(r.when, { session: 's1', body: 'detailed summary' });  // 只留认识的字段,值 trim
   const empty = normalizeRule(null);
   assert.strictEqual(empty.match, '');
   assert.deepStrictEqual(empty.pool, []);

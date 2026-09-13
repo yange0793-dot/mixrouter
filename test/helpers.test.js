@@ -102,6 +102,41 @@ test('resolveRoute 无命中时走 default,可覆盖模型', () => {
   assert.strictEqual(r.model, 'fallback-model');
 });
 
+test('resolveRoute when.body 内容分流:先于普通规则,不限模型也能命中', () => {
+  _state.store = { claude: [{ id: 'p1' }, { id: 'p2' }], codex: [] };
+  _state.routes = { rules: [
+    { id: 'r1', match: 'main', provider: 'p1', model: 'normal-model', enabled: true },
+    { id: 'r2', match: '', provider: 'p2', model: 'sol-model', when: { body: 'detailed summary of the conversation' }, enabled: true },
+  ], default: { provider: '', model: '' } };
+  const hit = resolveRoute('mixr-main', { bodyText: () => 'x create a detailed summary of the conversation so far y' });
+  assert.strictEqual(hit.rule.id, 'r2');
+  assert.strictEqual(hit.provider.id, 'p2');
+  assert.strictEqual(hit.model, 'sol-model');
+  assert.strictEqual(hit.content, true);
+  // 请求体没那段文本 → 内容规则不命中,照走普通规则
+  const miss = resolveRoute('mixr-main', { bodyText: () => 'a normal turn' });
+  assert.strictEqual(miss.rule.id, 'r1');
+  assert.strictEqual(miss.content, undefined);
+  // match 有值时按模型名限定:换个模型名就不再命中这条内容规则
+  _state.routes = { rules: [
+    { id: 'r3', match: 'mixr-main', provider: 'p2', model: 'limited-model', when: { body: 'detailed summary' }, enabled: true },
+  ], default: { provider: 'p1', model: 'fallback' } };
+  assert.strictEqual(resolveRoute('mixr-main', { bodyText: () => 'detailed summary' }).rule.id, 'r3');
+  assert.strictEqual(resolveRoute('mixr-haiku', { bodyText: () => 'detailed summary' }).rule, null);
+});
+
+test('resolveRoute when.body 支持主备池且保留策略', () => {
+  _state.store = { claude: [{ id: 'p1' }, { id: 'p2' }], codex: [] };
+  _state.routes = { rules: [
+    { id: 'r1', match: '', strategy: 'priority', when: { body: 'summary of the conversation' }, enabled: true,
+      pool: [{ provider: 'p1', model: 'primary' }, { provider: 'p2', model: 'backup' }] },
+  ], default: { provider: '', model: '' } };
+  const hit = resolveRoute('anything', { bodyText: () => 'summary of the conversation' });
+  assert.strictEqual(hit.content, true);
+  assert.strictEqual(hit.strategy, 'priority');
+  assert.deepStrictEqual(hit.members.map(m => [m.provider.id, m.model]), [['p1', 'primary'], ['p2', 'backup']]);
+});
+
 test('validBaseUrl 只收 http(s) URL', () => {
   assert.strictEqual(validBaseUrl('https://api.example.com'), true);
   assert.strictEqual(validBaseUrl('http://127.0.0.1:8787'), true);

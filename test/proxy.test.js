@@ -245,6 +245,49 @@ test('控制台 API:渠道 CRUD 全流程,key 不出网', async () => {
   assert.ok(![...after.providers.claude, ...after.providers.codex].some(p => p.id === id));
 });
 
+test('多 Key 渠道:清单只出掩码,切换生效 Key 后上游收到的就是新 Key', async () => {
+  const created = await rawRequest(uiPort, 'POST', '/api/providers', {
+    body: { app: 'claude', name: '多账号渠道', base_url: `http://127.0.0.1:${mockPort}`, api_key: 'sk-acct-one-0001',
+      models: ['claude-opus-5'], keys: [{ label: '账号1', key: 'sk-acct-one-0001' }, { label: '账号2', key: 'sk-acct-two-0002' }] },
+  });
+  const id = JSON.parse(created.text).id;
+  routesBackup.push(mod._state.routes);
+  mod._state.routes = { rules: [{ id: 'rmk', match: 'mkprobe', provider: id, model: '', enabled: true }], default: { provider: '', model: '' } };
+
+  const state = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text);
+  const p = state.providers.claude.find(x => x.id === id);
+  assert.strictEqual(p.keys.length, 2);
+  assert.strictEqual(p.keys[0].label, '账号1');
+  assert.ok(p.keys.every(k => k.key === undefined && k.key_masked.includes('…')), '清单里不能出明文 Key');
+  assert.ok(!JSON.stringify(state).includes('sk-acct-two-0002'), '明文 Key 不能出现在 state 里');
+  const key2 = p.keys[1].id;
+
+  // 第一个 Key 生效时:上游收到 api_key 对应的凭据
+  await rawRequest(proxyPort, 'POST', '/v1/messages', { body: { model: 'mkprobe-1', max_tokens: 4, messages: [{ role: 'user', content: 'hi' }] } });
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-acct-one-0001');
+
+  // 切换到第二个 Key:同一个渠道、同一批槽位/规则,转发立刻改用新 Key
+  const sw = await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { active_key: key2 } });
+  assert.strictEqual(sw.status, 200);
+  await rawRequest(proxyPort, 'POST', '/v1/messages', { body: { model: 'mkprobe-2', max_tokens: 4, messages: [{ role: 'user', content: 'hi' }] } });
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-acct-two-0002');
+  const after = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text);
+  const p2 = after.providers.claude.find(x => x.id === id);
+  assert.strictEqual(p2.active_key, key2);
+  assert.strictEqual(p2.key_masked, 'sk-acc…0002');
+  // 改动前后老 Key 仍在清单里(切换不删 Key)
+  assert.strictEqual(p2.keys.length, 2);
+
+  // 空值 Key 被拒;清单清空 = 退回单 Key
+  const bad = await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { keys: [{ label: 'x', key: '' }] } });
+  assert.strictEqual(bad.status, 400);
+  await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { keys: [] } });
+  const cleared = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text).providers.claude.find(x => x.id === id);
+  assert.deepStrictEqual(cleared.keys, []);
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${id}`);
+  mod._state.routes = routesBackup.pop();
+});
+
 test('日志过滤与统计聚合', async () => {
   // 造一条失败记录
   mod._state.store.claude.push({ id: 'pdown', name: '死渠道', base_url: 'http://127.0.0.1:1', api_key: 'sk-x', enabled: true });
