@@ -43,6 +43,55 @@ test('anthropicToResponses:system/工具/图片/tool_use/tool_result 全映射',
   assert.strictEqual(r.input[3].output, 'file.txt');
 });
 
+test('anthropicToResponses:tool_result 里的图片也转 input_image,不带图时维持字符串形状', () => {
+  const withImg = wire.anthropicToResponses({
+    model: 'm', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_9', content: [
+      { type: 'text', text: 'screenshot:' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAA' } },
+    ] }] }],
+  });
+  const out = withImg.input.find(i => i.type === 'function_call_output');
+  assert.strictEqual(out.call_id, 'tu_9');
+  assert.deepStrictEqual(out.output, [
+    { type: 'input_text', text: 'screenshot:' },
+    { type: 'input_image', image_url: 'data:image/png;base64,AAA' },
+  ]);
+
+  const remote = wire.anthropicToResponses({
+    model: 'm', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_8', content: [
+      { type: 'image', source: { type: 'url', url: 'https://img.example/a.png' } },
+    ] }] }],
+  });
+  assert.deepStrictEqual(remote.input.find(i => i.type === 'function_call_output').output,
+    [{ type: 'input_image', image_url: 'https://img.example/a.png' }]);
+
+  // 不带图:保持原来的纯字符串 output,不改变已有上游看到的行为
+  const noImg = wire.anthropicToResponses({
+    model: 'm', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: [{ type: 'text', text: 'file.txt' }] }] }],
+  });
+  assert.strictEqual(noImg.input.find(i => i.type === 'function_call_output').output, 'file.txt');
+});
+
+test('anthropicToResponses:显式 effort 原样传递,不猜 thinking 预算或默认强度', () => {
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const r = wire.anthropicToResponses({
+      model: 'gpt-6-astra', output_config: { effort }, thinking: { type: 'adaptive' },
+      tools: [{ name: 'check', input_schema: { type: 'object', properties: {} } }],
+      messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAA' } }] }],
+    });
+    assert.deepStrictEqual(r.reasoning, { effort });
+    assert.strictEqual(r.tools[0].type, 'function');
+    assert.deepStrictEqual(r.input[0].content[0], { type: 'input_image', image_url: 'data:image/png;base64,AAA' });
+    assert.strictEqual(r.reasoning_effort, undefined);
+  }
+  for (const extra of [{}, { thinking: { type: 'adaptive' } }, { thinking: { type: 'enabled', budget_tokens: 10000 } }, { output_config: { effort: 'unknown' } }]) {
+    assert.strictEqual(wire.anthropicToResponses({ model: 'm', messages: [], ...extra }).reasoning, undefined);
+  }
+});
+
 test('anthropicToResponses:max_output_tokens 有下限与上限', () => {
   assert.strictEqual(wire.anthropicToResponses({ model: 'm', messages: [] }, {}).max_output_tokens, 32000);
   assert.strictEqual(wire.anthropicToResponses({ model: 'm', max_tokens: 1, messages: [] }, {}).max_output_tokens, 16);
@@ -169,6 +218,23 @@ test('非流式:messages 翻成 responses 发上游,响应翻回 Anthropic', asy
   assert.strictEqual(j.content[0].text, 'conv-echo:gpt-6-astra');
   assert.strictEqual(j.usage.input_tokens, 21);
   assert.strictEqual(r.headers['x-mixrouter-provider'], 'astra');      // 渠道名经 safeHeader 只留 ASCII
+});
+
+test('Responses 出站同时保留图片、工具和 high effort', async () => {
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: {
+      model: 'claude-opus-5', max_tokens: 64, output_config: { effort: 'high' }, thinking: { type: 'adaptive' },
+      tools: [{ name: 'check', input_schema: { type: 'object', properties: {} } }],
+      messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAA' } }] }],
+    },
+  });
+  assert.strictEqual(r.status, 200);
+  const seen = up.requests.at(-1);
+  assert.strictEqual(seen.url, '/v1/responses');
+  assert.deepStrictEqual(seen.body.reasoning, { effort: 'high' });
+  assert.strictEqual(seen.body.tools[0].name, 'check');
+  assert.deepStrictEqual(seen.body.input[0].content[0], { type: 'input_image', image_url: 'data:image/png;base64,AAA' });
+  assert.strictEqual(seen.body.reasoning_effort, undefined);
 });
 
 test('流式:responses SSE → Anthropic SSE 事件序列', async () => {

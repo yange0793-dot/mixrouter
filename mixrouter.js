@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
 
-const VERSION = '3.3.0';
+const VERSION = '3.3.1';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -397,17 +397,19 @@ function loadSessions() {
   sessions = new Map(Object.entries(list));
 }
 let sessionsDirty = false, sessionsTimer = null;
+// 立即落盘。退出路径要走这个:写盘有 1s 去抖,进程一退,窗口内的绑定就丢了
+function flushSessions() {
+  if (sessionsTimer) { clearTimeout(sessionsTimer); sessionsTimer = null; }
+  if (!sessionsDirty) return;
+  sessionsDirty = false;
+  const bindings = {};
+  for (const [k, v] of sessions) bindings[k] = v;
+  saveJson(SESSIONS_FILE, { version: 1, bindings });
+}
 function saveSessionsSoon() {
   sessionsDirty = true;
   if (sessionsTimer) return;
-  sessionsTimer = setTimeout(() => {
-    sessionsTimer = null;
-    if (!sessionsDirty) return;
-    sessionsDirty = false;
-    const bindings = {};
-    for (const [k, v] of sessions) bindings[k] = v;
-    saveJson(SESSIONS_FILE, { version: 1, bindings });
-  }, 1000);
+  sessionsTimer = setTimeout(() => { sessionsTimer = null; flushSessions(); }, 1000);
   if (sessionsTimer.unref) sessionsTimer.unref();
 }
 // 日志/控制台里显示的短 id:去掉来源前缀再取前 8 位,和客户端自己显示的会话号对得上
@@ -530,9 +532,12 @@ function resolveSessionTarget(rule, members, key, label, kind, app = 'claude') {
   const now = Date.now();
   const bound = sessions.get(key);
   const touch = () => { bound.lastUsed = now; applyLabel(bound, label); };
+  // 槽位请求(别名 mixr-*)只代表"这一条请求"照槽位表走,不代表对话换了渠道:
+  // 手动钉定不该劫持它,否则会把槽位渠道的落点模型发给被钉定的那个渠道(400 或记到错账号)
+  const slotRequest = String((rule && rule.id) || '').startsWith('slot:');
   if (bound) {
     // 手动钉定压过策略:哪怕这个渠道不在池里也照走——钉定的意义就是"这个对话我要它走这里"
-    if (bound.pinned) {
+    if (bound.pinned && !slotRequest) {
       const p = storeOf(app).find(x => x.id === bound.providerId);
       if (p && p.enabled !== false && !inCooldown(bound.providerId)) {
         touch();
@@ -599,6 +604,29 @@ function todayStats() {
     reqs++; inTok += e.in || 0; outTok += e.out || 0;
   }
   return { reqs, inTok, outTok };
+}
+
+// 内容分流(when.body)的匹配文本:system/instructions + 最后一条消息。
+// 不用整包 body——历史每轮重发,对话里出现过的短语会永久劫持路由(实测:一条引用了规则原文的
+// 子代理报告进来后,主槽请求全部被判给内容分流规则)。压缩类请求的指令就在最后一条消息里。
+function bodyRouteText(body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const parts = [];
+  const sys = b.system ?? b.instructions;
+  if (typeof sys === 'string') parts.push(sys);
+  else if (Array.isArray(sys)) {
+    for (const x of sys) {
+      if (typeof x === 'string') parts.push(x);
+      else if (x && x.type === 'text') parts.push(x.text || '');
+    }
+  }
+  const msgs = Array.isArray(b.messages) ? b.messages : (Array.isArray(b.input) ? b.input : []);
+  const last = msgs.length ? msgs[msgs.length - 1] : null;
+  if (last) {
+    const c = last.content ?? last.text ?? '';
+    parts.push(typeof c === 'string' ? c : JSON.stringify(c));
+  }
+  return parts.join('\n');
 }
 
 // ---------------------------------------------------------------- 路由解析
@@ -1018,9 +1046,12 @@ function proxyHandler(req, res) {
     const modelIn = body.model || '';
     const ident = sessionIdentity(req, body, ep.app);
     const label = sessionLabel(body, ep.app);
-    // 只有存在 when.body 规则时才会真拼这段文本(压缩请求体上百 KB,没规则就不白拼)
-    let bodyLower;
-    const bodyText = () => bodyLower ?? (bodyLower = Buffer.concat(chunks).toString('utf8').toLowerCase());
+    // 内容分流(when.body)只看「system/instructions + 最后一条消息」,不看整段历史:
+    // 整包 body 里带着全部对话,历史里偶然出现一次触发短语(比如把规则原文引用了一遍)
+    // 就会让此后每条请求都改道,而且是永久性的——历史每轮都重发。实测踩过。
+    // 压缩类请求的指令就在最后一条消息里,照旧命中。只在真有 when.body 规则时才拼。
+    let routeLower;
+    const bodyText = () => routeLower ?? (routeLower = bodyRouteText(body).toLowerCase());
     const resolved = resolveRoute(modelIn, {
       session: ident.key, ua: req.headers['user-agent'], token: clientToken(req), bodyText,
     }, ep.app);
@@ -1147,8 +1178,10 @@ function proxyHandler(req, res) {
         done = true;
         entry.status = cres.statusCode;
         entry.sticky = wasSticky && !entry.failover;
-        // 落到这个渠道就把它记进会话(含失败转移后重新绑定),后续请求继续粘它
-        if (cres.statusCode < 400 && !resolved.content && (sess.providerId !== provider.id || entry.failover)) {
+        // 落到这个渠道就把它记进会话(含失败转移后重新绑定),后续请求继续粘它。
+        // 槽位请求例外:一条 haiku 起标题请求就把整个对话挪到槽位渠道的话,下一条主模型请求
+        // 会跟着跑偏,同一对话内的 prompt 缓存被打断(与 README 的承诺相反)。
+        if (cres.statusCode < 400 && !resolved.content && !resolved.slot && (sess.providerId !== provider.id || entry.failover)) {
           sess.providerId = provider.id; sess.model = model;
           sess.ruleId = (resolved.rule && resolved.rule.id) || 'default';
         }
@@ -1340,20 +1373,22 @@ function backupFile(file) {
 }
 
 function switchClaude(p) {
+  // 标了 wire_api:'responses' 的渠道只挂 Codex 型通道,上游根本没有 /v1/messages:
+  // 直连写进去等于把客户端写坏(而且界面上还显示切换成功)。拒绝,让它走路由模式。
+  if (wireOf(p, 'claude') === 'responses')
+    throw Object.assign(new Error('该渠道标了 wire_api: responses(模型只挂在 Codex 型通道上),直连后 Claude Code 的 /v1/messages 必然失败;请改用控制台的「路由模式」经本机代理转发'), { statusCode: 400 });
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')); } catch {}
   backupFile(CLAUDE_SETTINGS);
   cfg.env = cfg.env || {};
   cfg.env.ANTHROPIC_BASE_URL = p.base_url;
   cfg.env.ANTHROPIC_AUTH_TOKEN = p.api_key;
-  if (p.models && p.models[0]) cfg.env.ANTHROPIC_MODEL = p.models[0];
-  // 槽位模型:渠道里填了才写,没填保留现状(不清空用户已有值)
-  if (p.slots) {
-    if (p.slots.opus) cfg.env.ANTHROPIC_DEFAULT_OPUS_MODEL = p.slots.opus;
-    if (p.slots.sonnet) cfg.env.ANTHROPIC_DEFAULT_SONNET_MODEL = p.slots.sonnet;
-    if (p.slots.fable) cfg.env.ANTHROPIC_DEFAULT_FABLE_MODEL = p.slots.fable;
-    if (p.slots.haiku) cfg.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = p.slots.haiku;
-    if (p.slots.subagent) cfg.env.CLAUDE_CODE_SUBAGENT_MODEL = p.slots.subagent;
+  // 槽位模型:渠道里填了才写;没填的槽位若当前是控制台托管的 mixr- 别名,必须清掉——
+  // 否则直连时客户端会把 mixr-haiku 当模型名发给真实上游(与路由模式的清理逻辑一致)
+  for (const [name, envKey] of Object.entries(CLAUDE_SLOT_ENV)) {
+    const v = name === 'main' ? ((p.models && p.models[0]) || '') : ((p.slots && p.slots[name]) || '');
+    if (v) cfg.env[envKey] = v;
+    else if (String(cfg.env[envKey] || '').startsWith('mixr-')) delete cfg.env[envKey];
   }
   fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(cfg, null, 2) + '\n');
   try { fs.chmodSync(CLAUDE_SETTINGS, 0o600); } catch {}
@@ -1596,11 +1631,19 @@ function maskKey(k) {
   if (!k) return '';
   return k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '***';
 }
+// 老式单 Key 渠道(只有 api_key、没有 keys 清单)在控制台里同样要看得见:给它合成一条固定
+// id 的「账号1」。否则编辑弹窗的清单是空的,用户"再加一把"时服务端只看到新清单,老 Key 被整份替换掉
+const LEGACY_KEY_ID = 'klegacy';
+function ringOf(p) {
+  if (Array.isArray(p.keys) && p.keys.length) return p.keys;
+  return p.api_key ? [{ id: LEGACY_KEY_ID, label: '账号1', key: p.api_key }] : [];
+}
 function publicProvider(p) {
   const { api_key, keys, ...rest } = p;
+  const ring = ringOf(p);
   return { ...rest, key_masked: maskKey(api_key), has_key: !!api_key,
-    keys: (keys || []).map(k => ({ id: k.id, label: k.label, key_masked: maskKey(k.key) })),
-    active_key: (keys || []).some(k => k.id === p.active_key) ? p.active_key : ((keys || [])[0] || {}).id || '' };
+    keys: ring.map(k => ({ id: k.id, label: k.label, key_masked: maskKey(k.key) })),
+    active_key: ring.some(k => k.id === p.active_key) ? p.active_key : ((ring[0] || {}).id || '') };
 }
 
 // 同一渠道可存多把 Key(同 provider 多账号),切换 = 换生效 Key;api_key 始终等于生效那把,
@@ -1759,7 +1802,9 @@ function apiHandler(req, res) {
         }
         // 多 Key(同渠道多账号):keys 是清单,active_key 是当前生效那把,api_key 跟着它走
         if (b.keys !== undefined) {
-          const kr = normalizeKeys(b.keys, prov.keys || []);
+          // 清单里留空的行按 prev 解析回原值;老式单 Key 渠道的现存 api_key 也算 prev 的一条,
+          // 这样「再加一把」不会把老 Key 挤掉(丢 Key 的根因就在这)
+          const kr = normalizeKeys(b.keys, ringOf(prov));
           if (kr.error) return send(400, { error: kr.error });
           if (kr.keys.length) prov.keys = kr.keys; else delete prov.keys;
         }
@@ -1945,7 +1990,7 @@ if (require.main === module) {
   // 优雅退出:落盘运行时状态 + 以 0 退出。launchd 的 KeepAlive.SuccessfulExit=false 靠这个区分
   // 「mixctl stop / launchctl kickstart -k 的正常停止」与「真崩了」,前者不会被立刻重新拉起。
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => {
-    try { saveStore(); saveRoutes(); saveSlots(); } catch {}
+    try { saveStore(); saveRoutes(); saveSlots(); flushSessions(); } catch {}
     process.exit(0);
   });
 }
@@ -1958,7 +2003,7 @@ module.exports = {
   switchZcode, switchZcodeRouter, zcodeSpec, zcodeRouterSpec, liveZcodeState, joinUpstreamPath,
   liveState, testProvider, codexTopLevel, writeCodexConfig,
   // v3 会话分发
-  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, poolMembers, ruleBelongsToApp,
+  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, poolMembers, ruleBelongsToApp, bodyRouteText,
   sessionList, buildUpstreamHeaders, clientToken, strategyOf, applyLabel,
   // v3.1 OpenAI 端点(Codex 组)
   ENDPOINTS, classifyProxyRequest, wireOf, upstreamPathOf, modelList, buildOpenAiHeaders,
