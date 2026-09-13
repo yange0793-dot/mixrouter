@@ -22,7 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 
-const VERSION = '3.2.0';
+const VERSION = '3.2.1';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -63,7 +63,7 @@ const COOLDOWN_MS = Number(process.env.MIXR_COOLDOWN_SEC || 60) * 1000;
 const MAX_ATTEMPTS = Number(process.env.MIXR_MAX_ATTEMPTS || 3);
 // 会话标签(从 system prompt 的工作目录 / 首条用户消息取,便于控制台认出是哪个对话);置 0 关闭
 const SESSION_LABEL = process.env.MIXR_SESSION_LABEL !== '0';
-const STRATEGIES = ['round_robin', 'weighted', 'least_used', 'random'];
+const STRATEGIES = ['round_robin', 'weighted', 'least_used', 'random', 'priority'];
 // 客户端真实配置(测试时可用环境变量重定向到临时目录)
 const CLAUDE_SETTINGS = process.env.MIXR_CLAUDE_SETTINGS || path.join(os.homedir(), '.claude', 'settings.json');
 const CODEX_CONFIG = process.env.MIXR_CODEX_CONFIG || path.join(os.homedir(), '.codex', 'config.toml');
@@ -471,6 +471,8 @@ function pickMember(rule, members, key) {
   const cands = usable.length ? usable : members;
   if (cands.length === 1) return cands[0];
   const strat = strategyOf(rule);
+  // priority(主备):永远取池序里第一个可用渠道,主渠道冷却中才落到下一个——失败降级语义
+  if (strat === 'priority') return cands[0];
   if (strat === 'random') return cands[Math.floor(Math.random() * cands.length)];
   if (strat === 'least_used') {
     let best = cands[0];
@@ -1782,6 +1784,8 @@ module.exports = {
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
   // v3.2 子代理槽位
   slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
+  // v3.2 渠道池主备策略
+  pickMember, markCooldown, inCooldown,
   ROUTER_ID, ROUTER_URL, ROUTER_TOKEN, ROUTER_SECTION,
   _state: {
     get store() { return store; }, set store(v) { store = v; },

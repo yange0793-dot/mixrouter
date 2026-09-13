@@ -116,3 +116,22 @@ test('导出的 VERSION 与 package.json 一致', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   assert.strictEqual(VERSION, pkg.version);
 });
+
+test('priority 主备策略:永远取池序第一个可用渠道,主冷却才降级', () => {
+  const { pickMember, markCooldown } = require('../mixrouter.js');
+  const rule = { id: 't-pri', strategy: 'priority', pool: [] };
+  const pa = { id: 'pa', name: '主', base_url: 'https://a.example', enabled: true };
+  const pb = { id: 'pb', name: '备', base_url: 'https://b.example', enabled: true };
+  const members = [{ provider: pa, model: 'm1', weight: 1 }, { provider: pb, model: 'm2', weight: 1 }];
+  assert.strictEqual(pickMember(rule, members, 'k1').provider.id, 'pa');
+  assert.strictEqual(pickMember(rule, members, 'k2').provider.id, 'pa', '不做轮询,始终主渠道');
+  markCooldown('pa', 500);
+  assert.strictEqual(pickMember(rule, members, 'k3').provider.id, 'pb', '主冷却中 → 备渠道');
+  assert.strictEqual(pickMember(rule, members, 'k4').provider.id, 'pb');
+  // 全冷却时回到池序首位(现有兜底语义)
+  markCooldown('pb', 500);
+  assert.strictEqual(pickMember(rule, members, 'k5').provider.id, 'pa');
+  // 未知策略回落轮询,不受影响
+  const rr = pickMember({ id: 't-rr', strategy: 'bogus', pool: [] }, members, 'k6');
+  assert.ok([pa, pb].some(p => p.id === rr.provider.id));
+});

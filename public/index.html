@@ -764,7 +764,7 @@ async function applySlotsClaude() {
 }
 
 // ---------------- 路由 ----------------
-const STRAT_LABEL = { round_robin: '轮询(新对话依次分配)', weighted: '加权(按权重比例)', least_used: '最少会话优先', random: '随机' };
+const STRAT_LABEL = { priority: '主备(按池序,主挂了才降级)', round_robin: '轮询(新对话依次分配)', weighted: '加权(按权重比例)', least_used: '最少会话优先', random: '随机' };
 function blankRule() {
   return { id: 'r' + Date.now(), match: '', provider: '', model: '', pool: [], strategy: 'round_robin', priority: 0, app: '', when: {}, enabled: true };
 }
