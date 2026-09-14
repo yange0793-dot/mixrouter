@@ -24,7 +24,7 @@ const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
 const { upstreamAgent } = require('./lib/upstream-proxy');
 
-const VERSION = '3.5.0';
+const VERSION = '3.5.1';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
