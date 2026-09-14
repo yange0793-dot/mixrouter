@@ -42,7 +42,17 @@ function envInt(name, fallback, min = 1, max = 2147483647) {
   const value = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
   return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
 }
-const FIRST_HEADER_TIMEOUT_MS = envInt('MIXR_FIRST_HEADER_TIMEOUT_MS', 600000);
+// ---- 端到端超时预算 ----
+// 客户端(Claude Code)默认 API_TIMEOUT_MS=300s 是整条请求的总预算,CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS=120s
+// 是"多久没收到字节就本地放弃"。本进程的三段超时必须**全部**落在客户端预算里面:
+// 一旦反过来(以前三段都是 600s),客户端会先放弃并重发,我们还在替一条没人接收的响应占着
+// 上游连接和渠道额度,日志也记成 499 client closed 而不是真实的 timeout。
+// 所以:总 deadline 卡在最外层,三段各自再被它夹住,谁都超不出去。
+const TOTAL_DEADLINE_MS = envInt('MIXR_TOTAL_DEADLINE_MS', 240000);
+const FIRST_HEADER_TIMEOUT_MS = Math.min(envInt('MIXR_FIRST_HEADER_TIMEOUT_MS', 120000), TOTAL_DEADLINE_MS);
+// 流式请求的上游一接受就会发响应头,迟迟等不到头基本就是死了,不必陪着耗到总预算
+const STREAM_FIRST_HEADER_TIMEOUT_MS = Math.min(envInt('MIXR_STREAM_FIRST_HEADER_TIMEOUT_MS', 60000), TOTAL_DEADLINE_MS);
+const firstHeaderTimeoutFor = stream => (stream ? STREAM_FIRST_HEADER_TIMEOUT_MS : FIRST_HEADER_TIMEOUT_MS);
 // 兼容监听:旧客户端把 BASE_URL 写死到别的端口(如切换器/本地转换代理的端口)时,
 // 让本进程顺带在那个端口上也服务——接管时**正在跑**的会话不必重启。best-effort,占不到只告警。
 function altPorts(primary, ui) {
@@ -50,8 +60,13 @@ function altPorts(primary, ui) {
     .filter(p => Number.isInteger(p) && p > 0 && p < 65536 && p !== primary && p !== ui);
   return [...new Set(ports)];
 }
-const STREAM_IDLE_TIMEOUT_MS = envInt('MIXR_STREAM_IDLE_TIMEOUT_MS', 600000);
-const NONSTREAM_TOTAL_TIMEOUT_MS = envInt('MIXR_NONSTREAM_TOTAL_TIMEOUT_MS', 600000);
+// 上游两次字节之间:必须 **小于** 客户端的字节流空闲超时,否则客户端先本地放弃,
+// 我们"上游空闲中断 + 换渠道"的诊断根本来不及送到(这正是长上下文被连杀的表现)
+const STREAM_IDLE_TIMEOUT_MS = Math.min(envInt('MIXR_STREAM_IDLE_TIMEOUT_MS', 90000), TOTAL_DEADLINE_MS);
+const NONSTREAM_TOTAL_TIMEOUT_MS = Math.min(envInt('MIXR_NONSTREAM_TOTAL_TIMEOUT_MS', 180000), TOTAL_DEADLINE_MS);
+// 已经提交给客户端的流式响应:每隔这么久补一行 SSE 注释,让客户端的字节流空闲计时器知道连接还活着
+// (上游在慢慢推理时这条通道会一直沉默)。0 = 关掉。
+const SSE_KEEPALIVE_MS = envInt('MIXR_SSE_KEEPALIVE_MS', 15000, 0);
 const TEST_TIMEOUT_MS = 15 * 1000;
 const BETA_1M = 'context-1m-2025-08-07';
 // agentrouter 等网关校验 UA 形态,裸 curl 一律 401;客户端没带 UA 时用它兜底
@@ -499,7 +514,9 @@ function errorClass(status, code = '') {
   return status >= 400 ? 'upstream_request' : '';
 }
 function healthStatus() {
-  return { settings: { first_header_timeout_ms: FIRST_HEADER_TIMEOUT_MS, stream_idle_timeout_ms: STREAM_IDLE_TIMEOUT_MS,
+  return { settings: { total_deadline_ms: TOTAL_DEADLINE_MS, first_header_timeout_ms: FIRST_HEADER_TIMEOUT_MS,
+    stream_first_header_timeout_ms: STREAM_FIRST_HEADER_TIMEOUT_MS,
+    stream_idle_timeout_ms: STREAM_IDLE_TIMEOUT_MS, sse_keepalive_ms: SSE_KEEPALIVE_MS,
     nonstream_total_timeout_ms: NONSTREAM_TOTAL_TIMEOUT_MS, max_attempts: MAX_ATTEMPTS, conversion_retries: CONV_RETRIES,
     cooldown_ms: COOLDOWN_MS, failure_threshold: FAILURE_THRESHOLD, recovery_threshold: RECOVERY_THRESHOLD, half_open_max_probes: 1 },
   providers: ['claude', 'codex'].flatMap(app => storeOf(app).map(p => ({ provider: p.id, app,
@@ -1181,9 +1198,25 @@ function proxyHandler(req, res) {
 
     // 单次请求的收尾:计数入会话、写日志、收响应(所有终止路径都走这里,避免漏记)
     let finalized = false;
+    // 已提交的 SSE 响应定期补一行注释:客户端按"多久没收到字节"判本地超时,上游慢慢推理时
+    // 这条通道会一直沉默,补一行它就知道连接还活着(注释行是标准 SSE,客户端会跳过)。
+    // **只在响应真的提交给客户端之后才启动**——提交前写哪怕一个字节,都会毁掉"一个字节都没写给
+    // 客户端就整条重试"的前提。所以这里不做轮询判断(getHeader 在响应头发出后就取不到了),
+    // 而是在每个提交点上显式 startKeepAlive()。
+    let keepAliveTimer = null;
+    const stopKeepAlive = () => { if (keepAliveTimer) { clearInterval(keepAliveTimer); keepAliveTimer = null; } };
+    const startKeepAlive = () => {
+      if (!SSE_KEEPALIVE_MS || keepAliveTimer) return;
+      keepAliveTimer = setInterval(() => {
+        if (finalized || res.writableEnded || res.destroyed) return stopKeepAlive();
+        try { res.write(': keep-alive\n\n'); } catch { stopKeepAlive(); }
+      }, SSE_KEEPALIVE_MS);
+      if (keepAliveTimer.unref) keepAliveTimer.unref(); // 兜底计时器不该成为进程退不出去的理由
+    };
     const finalize = () => {
       if (finalized) return;
       finalized = true;
+      stopKeepAlive();
       sess.reqs = (sess.reqs || 0) + 1;
       sess.inTok = (sess.inTok || 0) + (entry.in || 0);
       sess.outTok = (sess.outTok || 0) + (entry.out || 0);
@@ -1200,9 +1233,22 @@ function proxyHandler(req, res) {
     // 客户端断开(ESC 取消/进程退出):掐掉在途的上游请求并按取消收尾——
     // 不烧已无人接收的渠道额度,也不把客户端取消算成渠道失败;正常完成后 finalized 已置位,这里自然短路
     let clientClosed = false, activeReq = null, activeRes = null, releaseCurrent = null;
+    // 端到端总预算已经用尽:后面的重试/换渠道都不许再打上游,收尾按 timeout 记
+    let deadlineHit = false;
+    // 当前这一次尝试的看门狗计时器。放弃本次尝试去重试时必须先清掉,否则它会在 240s 之后
+    // 对一条早已收尾的请求开火,把好端端的成功条目改写成 timeout(还会钉住事件循环)。
+    let activeTimers = null;
+    const clearAttemptTimers = () => {
+      if (!activeTimers) return;
+      clearTimeout(activeTimers.bodyTimer); clearTimeout(activeTimers.deadlineTimer);
+      activeTimers = null;
+    };
     res.on('close', () => {
-      if (finalized) return;
+      // writableFinished=响应已正常写完,只是 close 事件走 nextTick 先到了(它比 promise
+      // 微任务还早)。这里若不放行,每条转换流的成功都会被记成 499 client closed + usage 0
+      if (finalized || res.writableFinished) return;
       clientClosed = true;
+      clearAttemptTimers();
       if (releaseCurrent) releaseCurrent('cancelled');
       try { if (activeReq) activeReq.destroy(); } catch {}
       try { if (activeRes) activeRes.destroy(); } catch {}
@@ -1214,6 +1260,8 @@ function proxyHandler(req, res) {
     });
 
     function tryCandidate(i) {
+      // 端到端总预算已经用尽(客户端那条响应早已收尾):再打上游只是替没人要的请求烧额度
+      if (deadlineHit) return;
       const member = ordered[i];
       const provider = member.provider;
       const wire = wireOf(provider, ep.app);
@@ -1260,6 +1308,8 @@ function proxyHandler(req, res) {
       const upstream = new URL(provider.base_url);
       const transport = upstream.protocol === 'https:' ? https : http;
       let done = false;
+      // 本次尝试等响应头的预算:流式请求上游一接受就发头,给短预算;非流式要等整篇生成完
+      const firstHeaderMs = firstHeaderTimeoutFor(!!body.stream);
       // 还有后备渠道时,把这次失败记到冷却里再换下一个
       const nextOrFail = (reason, errMsg, errClass) => {
         // 客户端已断开:重试没有意义,也别把取消算成渠道失败
@@ -1285,8 +1335,9 @@ function proxyHandler(req, res) {
         path: joinUpstreamPath(upstream.pathname, upstreamPathOf(wire, ep)),
         method: 'POST', headers,
         agent: upstreamAgent(upstream.protocol),
-        // 首字节(响应头)超时;流式空闲与非流式总超时分别由看门狗和 body 计时兜住
-        timeout: FIRST_HEADER_TIMEOUT_MS,
+        // 首字节(响应头)超时;流式与非流式预算不同(见 firstHeaderTimeoutFor),
+        // 之后再由空闲看门狗、非流式 body 计时和端到端总 deadline 兜住
+        timeout: firstHeaderMs,
       }, cres => {
         if (done) return;
         activeRes = cres;
@@ -1296,6 +1347,8 @@ function proxyHandler(req, res) {
         if ((cres.statusCode >= 500 || cres.statusCode === 429) && ((conv && convRetries < CONV_RETRIES) || i + 1 < ordered.length)) {
           done = true;
           cres.resume(); // 排水丢弃,避免占住 socket
+          // 这次尝试作废,先拆掉它的看门狗再去打下一个渠道
+          clearAttemptTimers();
           if (conv && convRetries < CONV_RETRIES) { convRetries++; rotateConvCacheGen(sessKey, provider.id); releaseBreaker('failure', `http ${cres.statusCode}`, cres.statusCode); return tryCandidate(i); }
           return nextOrFail(cres.statusCode, `HTTP ${cres.statusCode}`);
         }
@@ -1320,11 +1373,31 @@ function proxyHandler(req, res) {
         const ct = String(cres.headers['content-type'] || 'application/json');
         const isSse = ct.includes('text/event-stream');
         // 非流式总超时:从拿到响应头起算,整个 body 拖过上限就掐断
-        const totalTimer = isSse ? null : (NONSTREAM_TOTAL_TIMEOUT_MS ? setTimeout(() => {
+        const bodyTimer = !isSse && NONSTREAM_TOTAL_TIMEOUT_MS ? setTimeout(() => {
           try { cres.destroy(new Error('body timeout')); } catch {}
-        }, NONSTREAM_TOTAL_TIMEOUT_MS) : null);
+        }, NONSTREAM_TOTAL_TIMEOUT_MS) : null;
+        // 端到端总 deadline:从客户端请求到达起算,**流式也一样管**。以前流式只有"字节间空闲"
+        // 一条约束,慢慢滴的流能一直拖着;而客户端 300s 早就放弃了,我们还在替一条没人接收的
+        // 响应占着上游连接和渠道额度。这里是整个预算的最外层。
+        const deadlineTimer = TOTAL_DEADLINE_MS ? setTimeout(() => {
+          if (responseDone || convRetrying) return;
+          deadlineHit = true;
+          // 先把自己钉进日志:后面 relay / upstreamDead 的收尾都用 || 兜底,不会覆盖真实原因
+          entry.err = entry.err || `超出端到端总预算(${Math.round(TOTAL_DEADLINE_MS / 1000)}s)`;
+          entry.err_class = entry.err_class || 'timeout';
+          try { cres.destroy(new Error('timeout: 端到端总预算用尽')); } catch {}
+          // 还没提交给客户端就直接给一条明确的 504,别让它耗到自己的本地超时
+          if (!res.headersSent) {
+            upstreamDead(entry.err, 'timeout', { status: 504, message: '超出端到端总预算' });
+          }
+        }, Math.max(1, TOTAL_DEADLINE_MS - (Date.now() - started))) : null;
+        // 看门狗只是兜底,不该成为"进程还不能退出"的理由(测试里漏清就会挂满整个总预算)
+        if (bodyTimer && bodyTimer.unref) bodyTimer.unref();
+        if (deadlineTimer && deadlineTimer.unref) deadlineTimer.unref();
+        activeTimers = { bodyTimer, deadlineTimer };
         const finishEntry = u => {
-          if (totalTimer) clearTimeout(totalTimer);
+          if (bodyTimer) clearTimeout(bodyTimer);
+          if (deadlineTimer) clearTimeout(deadlineTimer);
           entry.ms = Date.now() - started;
           if (u) { entry.in = u.in || 0; entry.out = u.out || 0; entry.cache_read = u.cache_read || 0; }
           if (!entry.err_class && entry.status >= 400) entry.err_class = errorClass(entry.status, '');
@@ -1353,13 +1426,15 @@ function proxyHandler(req, res) {
         };
         const disarmIdle = () => { clearTimeout(idleTimer); idleTimer = null; };
         // 上游响应中途夭折(空闲/总超时、连接重置):补记日志并掐断客户端响应,别让它干等
-        const upstreamDead = (why, errClass) => {
+        const upstreamDead = (why, errClass, opts) => {
           if (responseDone || convRetrying) return;
           responseDone = true;
           entry.err = entry.err || String(why);
           entry.err_class = entry.err_class || errClass;
           finishEntry();
-          if (!res.headersSent) sendErr(502, 'api_error', `上游 ${provider.name} 响应中断: ${why}`, errClass);
+          const status = (opts && opts.status) || 502;
+          const what = (opts && opts.message) || '响应中断';
+          if (!res.headersSent) sendErr(status, 'api_error', `上游 ${provider.name} ${what}: ${why}`, errClass);
           else if (!res.writableEnded) { try { res.end(); } catch {} }
         };
         cres.on('data', armIdle);
@@ -1438,12 +1513,25 @@ function proxyHandler(req, res) {
           if (isSse) {
             wireResponses.relayAnthropicStream(cres, res, model, {
               mayRetry: !res.headersSent && convRetries < CONV_RETRIES, headers: outHeaders,
+              onCommit: startKeepAlive, // 真提交给客户端了,从这一刻起补心跳
             }).then(r => {
-              if (r && r.retryable) { convRetrying = true; convRetries++; rotateConvCacheGen(sessKey, provider.id); entry.attempts = i + 1; return tryCandidate(i); }
+              // 客户端已经走了就别再换 key 重打一遍:那是在为没人接收的请求烧渠道额度
+              if (r && r.retryable && !clientClosed && !res.destroyed && !deadlineHit) {
+                convRetrying = true; convRetries++; rotateConvCacheGen(sessKey, provider.id); entry.attempts = i + 1;
+                clearAttemptTimers(); // 这一发上游已经交给别人的 res,别让它 240s 后再来改这条日志
+                return tryCandidate(i);
+              }
+              // 终态已定,响应体和空闲看门狗都不该再判这一笔(否则夭折会被二次记成连接中断)
+              responseDone = true; disarmIdle();
+              // 客户端自己断的不算渠道的账(那是取消);上游真夭折才记这一笔
+              if (r && r.aborted && !clientClosed) {
+                entry.err = entry.err || r.detail || '上游流中断';
+                entry.err_class = entry.err_class || 'stream_aborted';
+              }
               const u = (r && r.usage) || {};
               finishEntry({
                 in: u.input_tokens || 0, out: u.output_tokens || 0,
-                cache_read: (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0,
+                cache_read: u.cache_read_input_tokens || 0,
               });
             });
             return;
@@ -1452,14 +1540,28 @@ function proxyHandler(req, res) {
           cres.on('data', c => parts.push(c));
           cres.on('end', () => {
             const text = Buffer.concat(parts).toString('utf8');
-            let msg = null;
-            try { msg = wireResponses.responsesToAnthropic(JSON.parse(text), model); } catch { /* 非 JSON 原样透传 */ }
+            let msg = null, rerr = null;
+            try {
+              const j = JSON.parse(text);
+              // HTTP 200 里包着 error / status=failed / 工具参数残缺:回 Anthropic error,
+              // 不能翻成一条 content 为空的"正常消息"
+              rerr = wireResponses.responsesErrorOf(j);
+              if (!rerr) msg = wireResponses.responsesToAnthropic(j, model);
+            } catch { /* 非 JSON 原样透传 */ }
+            if (rerr) {
+              entry.status = 502; // 记客户端真正拿到的状态:200 里包着的失败不是成功
+              entry.err = rerr.message; entry.err_class = entry.err_class || 'upstream_server';
+              finishEntry();
+              if (res.headersSent) { try { res.end(); } catch {} return; }
+              res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ type: 'error', error: rerr }));
+            }
             const u = (msg && msg.usage) || {};
             finishEntry({ in: u.input_tokens || 0, out: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0 });
             if (res.headersSent) return;
             try {
               // 客户端要流、上游却整包回 JSON:摊成 Anthropic SSE,别让 Claude Code 干等
-              if (msg && body.stream) wireResponses.emitAnthropicSse(res, msg, outHeaders);
+              if (msg && body.stream) wireResponses.emitAnthropicSse(res, msg, outHeaders, startKeepAlive);
               else { res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' }); res.end(msg ? JSON.stringify(msg) : text); }
             } catch {}
           });
@@ -1467,6 +1569,8 @@ function proxyHandler(req, res) {
         }
         // 同协议直通:Anthropic→Anthropic / responses→responses / chat→chat
         res.writeHead(cres.statusCode, outHeaders);
+        // 到这一步客户端那条响应已经提交,可以开始补心跳了
+        if (isSse) startKeepAlive();
         if (isSse) {
           let acc = '';
           cres.on('data', c => { if (acc.length < 1024 * 1024) acc += c.toString('utf8'); res.write(c); });
@@ -1488,7 +1592,7 @@ function proxyHandler(req, res) {
         if (done) return;
         done = true;
         creq.destroy(new Error('timeout'));
-        nextOrFail(0, `首字节超时(${Math.round(FIRST_HEADER_TIMEOUT_MS / 1000)}s)`, 'timeout');
+        nextOrFail(0, `首字节超时(${firstHeaderMs >= 1000 ? Math.round(firstHeaderMs / 1000) + 's' : firstHeaderMs + 'ms'})`, 'timeout');
       });
       creq.on('error', e => {
         if (done) return;

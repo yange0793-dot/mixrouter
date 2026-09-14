@@ -75,6 +75,35 @@ test('anthropicToResponses:tool_result 里的图片也转 input_image,不带图�
   assert.strictEqual(noImg.input.find(i => i.type === 'function_call_output').output, 'file.txt');
 });
 
+test('anthropicToResponses:只含 tool_reference 的 tool_result 不能变成空结果', () => {
+  // Claude Code 的 ToolSearch 结果就是这种形状:tool_result 里全是 tool_reference,没有 text/image。
+  // 丢掉它们等于告诉模型"搜到 0 个工具",它会以为结果无效而反复重搜。
+  const r = wire.anthropicToResponses({
+    model: 'm', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_ts', content: [
+      { type: 'tool_reference', tool_name: 'mcp__playwright__browser_navigate' },
+      { type: 'tool_reference', tool_name: 'mcp__playwright__browser_snapshot' },
+    ] }] }],
+  });
+  const out = r.input.find(i => i.type === 'function_call_output');
+  assert.strictEqual(out.call_id, 'tu_ts');
+  assert.notStrictEqual(out.output, '', '空结果会让模型以为搜索没有命中');
+  assert.ok(out.output.includes('mcp__playwright__browser_navigate') && out.output.includes('mcp__playwright__browser_snapshot'),
+    `引用的工具名要如实带上,实际:${JSON.stringify(out.output)}`);
+});
+
+test('anthropicToResponses:tool_reference 和文本混排时文本照旧、引用不丢', () => {
+  const r = wire.anthropicToResponses({
+    model: 'm', max_tokens: 64,
+    messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_mix', content: [
+      { type: 'text', text: '命中 1 个工具:' },
+      { type: 'tool_reference', tool_name: 'Bash' },
+    ] }] }],
+  });
+  const out = r.input.find(i => i.type === 'function_call_output');
+  assert.strictEqual(out.output, '命中 1 个工具:\nBash');
+});
+
 test('anthropicToResponses:显式 effort 原样传递,不猜 thinking 预算或默认强度', () => {
   for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
     const r = wire.anthropicToResponses({
@@ -112,13 +141,14 @@ test('responsesToAnthropic:文本 + function_call → tool_use,usage 带上', ()
   assert.strictEqual(msg.stop_reason, 'tool_use');
   assert.strictEqual(msg.content[0].text, '答案');
   assert.deepStrictEqual(msg.content[1], { type: 'tool_use', id: 'c_1', name: 'Read', input: { p: 'a.txt' } });
-  assert.deepStrictEqual(msg.usage, { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 40 });
+  // 缓存命中要从 input_tokens 里减掉:Responses 的 input 含缓存,Anthropic 的不含
+  assert.deepStrictEqual(msg.usage, { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 40 });
 });
 
 // ---------------------------------------------------------------- 端到端
 function createResponsesUpstream() {
   const requests = [];
-  let failTimes = 0, jsonAlways = false;
+  let failTimes = 0, jsonAlways = false, abortMidStream = false, jsonBody = null, errorStreamTimes = 0;
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
@@ -127,13 +157,22 @@ function createResponsesUpstream() {
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch {}
       requests.push({ url: req.url, body, headers: req.headers });
       if (failTimes > 0) { failTimes--; res.writeHead(500, { 'content-type': 'application/json' }); return res.end('{"error":{"message":"负载已经达到上限"}}'); }
+      if (jsonBody) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(jsonBody)); }
       const text = `conv-echo:${body.model}`;
       if (body.stream && !jsonAlways) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         const sse = o => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
+        // 200 的状态码 + SSE 的皮,内容却是错误体:必须在给客户端写字节之前整条重试
+        if (errorStreamTimes > 0) {
+          errorStreamTimes--;
+          res.write('data: {"type":"error","error":{"message":"上游渠道池打满"}}\n\n');
+          return res.end();
+        }
         sse({ type: 'response.created', response: { id: 'resp_1', model: body.model } });
         sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_1' } });
         sse({ type: 'response.output_text.delta', delta: text });
+        // 给出内容后直接掐断连接:没有 response.completed —— 上游夭折的真实形态
+        if (abortMidStream) return void setTimeout(() => { try { res.destroy(); } catch {} }, 30);
         sse({ type: 'response.output_item.done', item: { type: 'message' } });
         sse({ type: 'response.completed', response: { id: 'resp_1', status: 'completed', model: body.model, usage: { input_tokens: 21, output_tokens: 7, input_tokens_details: { cached_tokens: 3 } } } });
         return res.end();
@@ -146,7 +185,14 @@ function createResponsesUpstream() {
       }));
     });
   });
-  return { server, requests, setFail: n => { failTimes = n; }, setJsonAlways: v => { jsonAlways = v; } };
+  return {
+    server, requests,
+    setFail: n => { failTimes = n; },
+    setJsonAlways: v => { jsonAlways = v; },
+    setAbortMidStream: v => { abortMidStream = v; },
+    setJsonBody: v => { jsonBody = v; },
+    setErrorStream: n => { errorStreamTimes = n; },
+  };
 }
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'mixr-conv-'));
@@ -157,6 +203,12 @@ process.env.MIXR_CONV_RETRIES = '2';
 
 const up = createResponsesUpstream();
 let mod, proxySrv, uiSrv, proxyPort, uiPort, upPort;
+
+// 请求日志的最后一行:用来断言"日志记的是不是真实结果"
+function lastRequestLog() {
+  const lines = fs.readFileSync(path.join(TMP, 'logs', 'requests.jsonl'), 'utf8').trim().split('\n');
+  return JSON.parse(lines[lines.length - 1]);
+}
 
 function rawRequest(port, method, reqPath, { headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -179,6 +231,7 @@ test('setup:responses 型 Claude 渠道 + mock 上游', async () => {
   await new Promise(ok => up.server.listen(0, '127.0.0.1', ok));
   upPort = up.server.address().port;
   up.server.unref();
+  fs.mkdirSync(path.join(TMP, 'logs'), { recursive: true }); // 请求日志要落盘才断言得了
   fs.writeFileSync(path.join(TMP, 'providers.json'), JSON.stringify({
     version: 2, current: { claude: 'p1', codex: null },
     claude: [{
@@ -257,9 +310,68 @@ test('客户端要流、上游整包回 JSON:摊成 Anthropic SSE', async () => 
   });
   up.setJsonAlways(false);
   assert.strictEqual(r.status, 200);
+  assert.ok(r.headers['content-type'].includes('text/event-stream'), '整包 JSON 摊成流时也要给 SSE 头');
   assert.ok(r.text.includes('event: message_start'));
   assert.ok(r.text.includes('conv-echo:gpt-6-astra'));
   assert.ok(r.text.includes('event: message_stop'));
+});
+
+// 真机形态:转换流的成功条目曾被记成 499 client closed + usage 0(下游 close 走 nextTick,
+// 比 promise 微任务还早,mixrouter 的 close 回调据此误判成取消)
+test('流式成功:日志不得记成 client closed,usage 要落地', async () => {
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'claude-opus-5', max_tokens: 64, stream: true, messages: [{ role: 'user', content: '记日志' }] },
+  });
+  assert.strictEqual(r.status, 200);
+  const log = lastRequestLog();
+  assert.strictEqual(log.status, 200);
+  assert.strictEqual(log.err, '', `不该有错误正文,实际:${log.err}`);
+  assert.notStrictEqual(log.err_class, 'cancelled');
+  assert.strictEqual(log.out, 7, 'usage 要真的落地');
+  assert.strictEqual(log.cache_read, 3);
+  assert.strictEqual(log.in, 18, '缓存命中从 input 里减掉');
+});
+
+test('上游流中途夭折:客户端收到 error,不出现 message_stop', async () => {
+  up.setAbortMidStream(true);
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'claude-opus-5', max_tokens: 64, stream: true, messages: [{ role: 'user', content: '断流' }] },
+  });
+  up.setAbortMidStream(false);
+  assert.strictEqual(r.status, 200);
+  assert.ok(r.text.includes('conv-echo:gpt-6-astra'), '已经产出的内容照发给客户端');
+  assert.ok(r.text.includes('event: error'), '夭折要发协议级 error');
+  assert.ok(!r.text.includes('event: message_stop'), '断流不得伪造正常结束');
+  assert.strictEqual(lastRequestLog().err_class, 'stream_aborted');
+});
+
+test('上游 200 但 status=failed:翻成 Anthropic error,不回空消息', async () => {
+  up.setJsonBody({ status: 'failed', error: { message: 'mock failure' } });
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'claude-opus-5', max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  up.setJsonBody(null);
+  assert.strictEqual(r.status, 502);
+  const j = JSON.parse(r.text);
+  assert.strictEqual(j.type, 'error');
+  assert.ok(j.error.message.includes('mock failure'));
+});
+
+test('上游 200 + SSE 皮里包错误:换一代 key 重试,同一条响应继续往下写', async () => {
+  up.setErrorStream(1);
+  const before = up.requests.length;
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'claude-opus-5', max_tokens: 64, stream: true, messages: [{ role: 'user', content: '重试' }] },
+  });
+  assert.strictEqual(r.status, 200);
+  const pair = up.requests.slice(before);
+  assert.strictEqual(pair.length, 2, '应重试一次');
+  assert.notStrictEqual(pair[0].body.prompt_cache_key, pair[1].body.prompt_cache_key, '重试要换一代 key(坏渠道会被亲和钉住)');
+  // 关键:重试用的是同一条 res,第一次尝试一个字节都没写出去
+  assert.ok(r.text.includes('event: message_start'), '重试后仍要能正常产出');
+  assert.ok(r.text.includes('conv-echo:gpt-6-astra'));
+  assert.ok(r.text.includes('event: message_stop'));
+  assert.ok(!r.text.includes('上游渠道池打满'), '被重试掉的错误不该漏给客户端');
 });
 
 test('count_tokens:responses 上游没有该端点,本地估一个', async () => {

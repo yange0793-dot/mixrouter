@@ -378,6 +378,21 @@ test('/api/health:只读视图带超时/重试配置与各渠道可用性', asyn
   assert.strictEqual(j.settings.cooldown_ms, 60000);
   assert.strictEqual(j.settings.max_attempts, 3);
   assert.strictEqual(j.settings.failure_threshold, 3);
+  // ---- 端到端预算必须落在客户端(Claude Code)的预算里面 ----
+  // CC 侧默认 API_TIMEOUT_MS=300s(整条请求)与 CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS=120s(多久没收到字节)。
+  // 本进程任何一段比它长,客户端都会先放弃并重发,我们还在替一条没人接收的响应占着上游连接和渠道额度,
+  // 日志还会记成 499 client closed 而不是真实的 timeout(以前三段默认都是 600s,就是这个问题)。
+  const CC_TOTAL_BUDGET_MS = 300000, CC_BYTE_IDLE_MS = 120000;
+  assert.ok(j.settings.total_deadline_ms > 0 && j.settings.total_deadline_ms <= CC_TOTAL_BUDGET_MS,
+    `总 deadline 必须存在且小于客户端的 ${CC_TOTAL_BUDGET_MS}ms,实际 ${j.settings.total_deadline_ms}`);
+  assert.ok(j.settings.stream_first_header_timeout_ms > 0 && j.settings.stream_first_header_timeout_ms < CC_TOTAL_BUDGET_MS,
+    '流式请求的上游一接受就发响应头,它的首字节预算必须比客户端总预算紧得多');
+  assert.ok(j.settings.stream_idle_timeout_ms < CC_BYTE_IDLE_MS,
+    '上游空闲看门狗必须早于客户端的字节流空闲超时,否则我们的诊断根本来不及送到');
+  for (const k of ['first_header_timeout_ms', 'stream_first_header_timeout_ms', 'stream_idle_timeout_ms', 'nonstream_total_timeout_ms']) {
+    assert.ok(j.settings[k] > 0 && j.settings[k] <= j.settings.total_deadline_ms,
+      `${k} 必须被总 deadline 夹住,实际 ${j.settings[k]} > ${j.settings.total_deadline_ms}`);
+  }
   const pa = j.providers.find(p => p.provider === 'pa');
   assert.ok(pa, 'providers 里应包含 pa');
   assert.strictEqual(pa.app, 'claude');

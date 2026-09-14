@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -18,4 +19,5 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       # 零依赖,无需 install;测试自带隔离环境,不触碰真实配置
-      - run: node --test test/*.test.js
+      # --test-timeout 是 Node 20.11+ 才有的 flag(v18.20.8 的 test runner 里没有),18 行退回裸命令,靠 timeout-minutes 兜底
+      - run: node --test ${{ matrix.node != 18 && '--test-timeout=30000' || '' }} test/*.test.js

@@ -35,7 +35,8 @@ function mockProxy({ refuse = false } = {}) {
   });
   return { server, tunnels };
 }
-const listen = (server, host = '127.0.0.1') => new Promise(ok => server.listen(0, host, ok));
+// 默认绑全接口:Linux 上 localhost 先解析 ::1,只绑 127.0.0.1 会让用例在 CI 上 ECONNREFUSED
+const listen = (server, host) => new Promise(ok => server.listen(0, host, ok));
 // keep-alive 隧道会让 server.close() 一直等连接,先掐掉现役连接
 const close = server => { try { server.closeAllConnections(); } catch {} return new Promise(ok => server.close(ok)); };
 const fetchThrough = (url, agent) => new Promise((resolve, reject) => {
@@ -47,7 +48,7 @@ const fetchThrough = (url, agent) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
-test('CONNECT 隧道:上游经代理转发,CONNECT 目标与凭据正确;连接复用;代理拒连时报错不静默直连', async t => {
+test('CONNECT 隧道:上游经代理转发,CONNECT 目标与凭据正确;连接复用;代理拒连时报错不静默直连', { timeout: 60000 }, async t => {
   const host = lanIP();
   if (!host) return t.skip('本机没有非环回 IPv4,隧道用例无法构造');
   const hits = [];
@@ -88,7 +89,7 @@ test('CONNECT 隧道:上游经代理转发,CONNECT 目标与凭据正确;连接�
     '代理挂掉后明确失败,不回落直连');
 });
 
-test('环回上游不走隧道:挂上出站代理后本机渠道照常直连', async t => {
+test('环回上游不走隧道:挂上出站代理后本机渠道照常直连', { timeout: 60000 }, async t => {
   const upstream = http.createServer((req, res) => { res.writeHead(200); res.end('local-direct'); });
   await listen(upstream);
   t.after(() => close(upstream));
@@ -110,7 +111,7 @@ test('环回上游不走隧道:挂上出站代理后本机渠道照常直连', a
   assert.equal(bypassed('notinternal.corp'), false);
 });
 
-test('CONNECT 隧道:TLS 上游(自签 CA 校验开启)与 IP 主机无 SNI', async t => {
+test('CONNECT 隧道:TLS 上游(自签 CA 校验开启)与 IP 主机无 SNI', { timeout: 60000 }, async t => {
   const host = lanIP();
   if (!host) return t.skip('本机没有非环回 IPv4,隧道用例无法构造');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mixr-tls-'));
