@@ -149,6 +149,15 @@ test('内容分流:when.body 规则把压缩请求从槽位别名上分走,普�
   assert.equal(r.status, 200);
   assert.equal(hits[1].body.model, 'gpt-5.6-sol');
   assert.equal(r.headers['x-mixrouter-model'], 'gpt-5.6-sol');
+  // 真实 2.1.270 形状:指令拼在最后一条 user 消息、末尾挂 system 通告,同样要从槽位别名上分走
+  r = await request(`http://127.0.0.1:${proxyPort()}/v1/messages`, 'POST',
+    { model: 'mixr-main', max_tokens: 1, messages: [
+      { role: 'user', content: '历史' },
+      { role: 'user', content: [{ tool_use_id: 't', type: 'tool_result', content: 'x' }, { type: 'text', text: 'Your task is to create a detailed summary of the conversation so far' }] },
+      { role: 'system', content: 'The following deferred tools are now available via ToolSearch' },
+    ] });
+  assert.equal(r.status, 200);
+  assert.equal(hits[2].body.model, 'gpt-5.6-sol');
 });
 
 test('槽位渠道停用/删除:provider_disabled_error 与 no_route_error 分型', async () => {

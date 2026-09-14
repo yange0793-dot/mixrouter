@@ -208,6 +208,31 @@ test('bodyRouteText:只拼 system/instructions 与最后一条消息,不碰历�
     input: [{ type: 'message', content: [{ type: 'input_text', text: 'head' }] }, { type: 'message', content: [{ type: 'input_text', text: 'tail' }] }],
   }), 'codex\n[{"type":"input_text","text":"tail"}]');
 });
+// 真实 Claude Code 2.1.270 压缩请求形状(抓包还原):指令以文本块拼在最后一条 user 消息里,
+// 其后还挂着 system 通告(ToolSearch 工具清单)——只看数组末尾会漏掉,必须补最后一条 user 消息
+test('bodyRouteText:末尾挂 system 通告的真实压缩请求形状也能命中,历史仍不进匹配文本', () => {
+  const realCompact = {
+    system: 'SYS',
+    messages: [
+      { role: 'user', content: '题目190486 开工,历史里的内容' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [
+        { tool_use_id: 't1', type: 'tool_result', content: 'xx' },
+        { type: 'text', text: 'CRITICAL: Your task is to create a detailed summary of the conversation so far' },
+      ] },
+      { role: 'system', content: 'The following deferred tools are now available via ToolSearch' },
+    ],
+  };
+  assert.ok(bodyRouteText(realCompact).includes('detailed summary of the conversation'),
+    '指令在最后一条 user 消息、末尾是 system 通告:必须命中');
+  assert.ok(!bodyRouteText(realCompact).includes('题目190486'), '历史消息依旧不进匹配文本');
+  const normalTail = { messages: [
+    { role: 'user', content: '历史' },
+    { role: 'user', content: [{ tool_use_id: 't', type: 'tool_result', content: 'res' }, { type: 'text', text: '当前轮正文' }] },
+    { role: 'system', content: 'The following deferred tools are now available via ToolSearch' },
+  ] };
+  assert.ok(bodyRouteText(normalTail).includes('当前轮正文'), '普通请求的当前轮正文也应参与匹配');
+});
 
 test('when.body 只看最后一条消息:历史里出现过触发短语,不再劫持后续请求', async () => {
   setRoutes([
@@ -230,6 +255,16 @@ test('when.body 只看最后一条消息:历史里出现过触发短语,不再�
     { role: 'user', content: 'Your task is to create a detailed summary of the conversation so far' },
   ] } });
   assert.strictEqual(real.key, 'sk-a', '压缩指令在最后一条消息里,必须照旧命中');
+  assert.strictEqual((await lastLog()).rule, 'rcompact');
+  assert.strictEqual(mock.requests.at(-1).body.model, 'deepseek-x');
+
+  // 真实 2.1.270 形状:指令拼在最后一条 user 消息、其后挂 system 通告,同样要命中内容分流
+  const realShape = await callWithSession('bodyhist3', { body: { messages: [
+    { role: 'user', content: '先前的上下文略' },
+    { role: 'user', content: [{ tool_use_id: 't', type: 'tool_result', content: 'xx' }, { type: 'text', text: 'Your task is to create a detailed summary of the conversation so far' }] },
+    { role: 'system', content: 'The following deferred tools are now available via ToolSearch' },
+  ] } });
+  assert.strictEqual(realShape.key, 'sk-a', '真实形状(指令在最后一条 user 消息、末尾是 system 通告)也要命中');
   assert.strictEqual((await lastLog()).rule, 'rcompact');
   assert.strictEqual(mock.requests.at(-1).body.model, 'deepseek-x');
 });

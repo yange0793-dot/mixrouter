@@ -656,6 +656,17 @@ function bodyRouteText(body) {
     const c = last.content ?? last.text ?? '';
     parts.push(typeof c === 'string' ? c : JSON.stringify(c));
   }
+  // 压缩指令拼在最后一条 user 消息里,其后可能还挂着 system 通告(如 ToolSearch 工具清单)——
+  // 实测 2.1.270 每条主链请求末尾都带 system 通告,只看数组末尾会漏掉全部真实 Claude Code 请求。
+  // 补上最后一条 user 消息;历史消息依旧不进匹配文本,防劫持边界不变。
+  let lastUser = null;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i] && msgs[i].role === 'user') { lastUser = msgs[i]; break; }
+  }
+  if (lastUser && lastUser !== last) {
+    const c = lastUser.content ?? lastUser.text ?? '';
+    parts.push(typeof c === 'string' ? c : JSON.stringify(c));
+  }
   return parts.join('\n');
 }
 
