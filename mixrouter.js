@@ -22,8 +22,9 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
+const { upstreamAgent } = require('./lib/upstream-proxy');
 
-const VERSION = '3.4.1';
+const VERSION = '3.5.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -225,6 +226,43 @@ function validateSlotPut(body) {
     }
   }
   return null;
+}
+
+function claudeSplitPatch(body) {
+  const bad = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
+  const target = (value, label) => {
+    if (!zcodeConfig.isObject(value) || typeof value.provider !== 'string' ||
+        typeof value.model !== 'string' || !value.model.trim()) bad(`${label} 必须指定 provider 和 model`);
+    const provider = store.claude.find(p => p.id === value.provider);
+    if (!provider || provider.enabled === false) bad(`${label} 必须选择已启用的 Claude 组渠道`);
+    return { provider: provider.id, model: value.model.trim() };
+  };
+  if (body.apply !== undefined && typeof body.apply !== 'boolean') bad('apply 必须是布尔值');
+  const subagent = target(body.subagent, '子代理');
+  if (body.main === undefined) {
+    const fixed = CLAUDE_SLOTS.filter(n => n !== 'subagent').map(n => slotMap.claude[n]);
+    if (fixed.some(s => !s || !s.provider || !s.model) ||
+        fixed.some(s => s.provider !== fixed[0].provider || s.model !== fixed[0].model))
+      bad('请先指定 main 建立统一主槽，再单独切换 subagent');
+    target(fixed[0], '主槽');
+    return { subagent };
+  }
+  const main = target(body.main, '主槽');
+  return Object.fromEntries(CLAUDE_SLOTS.map(n => [n, { ...(n === 'subagent' ? subagent : main) }]));
+}
+
+function configureClaudeSplit(body) {
+  const patch = claudeSplitPatch(body);
+  const previous = slotMap;
+  slotMap = { ...slotMap, claude: { ...slotMap.claude, ...patch } };
+  try { saveSlots(); } catch (e) { slotMap = previous; throw e; }
+  // 路由先持久化,再改客户端;启动只读 slots.json,不自动回放客户端备份。
+  if (body.apply) {
+    switchClaudeRouter({ slots: true });
+    current.claude = ROUTER_ID;
+    saveStore();
+  }
+  return { ok: true, applied: !!body.apply, slots: slotsPublic().claude };
 }
 
 // 控制台用:槽位一览(带渠道名/落点模型/停用状态;不含密钥)
@@ -1239,6 +1277,7 @@ function proxyHandler(req, res) {
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
         path: joinUpstreamPath(upstream.pathname, upstreamPathOf(wire, ep)),
         method: 'POST', headers,
+        agent: upstreamAgent(upstream.protocol),
         // 首字节(响应头)超时;流式空闲与非流式总超时分别由看门狗和 body 计时兜住
         timeout: FIRST_HEADER_TIMEOUT_MS,
       }, cres => {
@@ -1716,12 +1755,32 @@ function liveState() {
 function testProvider(p) {
   if (!p.api_key) return Promise.resolve({ ok: false, error: '未配置 API Key' });
   const u = new URL(p.base_url);
+  // 配了出站代理时先探隧道:隧道不通的环境里直连探活报"通"会误导(生产流量并不直连)
+  return upstreamProxyCheck(u).then(r => r || testProviderUpstream(p, u));
+}
+
+function upstreamProxyCheck(u) {
+  if (!upstreamAgent(u.protocol)) return Promise.resolve();
+  return new Promise(resolve => {
+    const transport = u.protocol === 'https:' ? https : http;
+    const creq = transport.request({
+      protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: '/', method: 'GET', agent: upstreamAgent(u.protocol), timeout: TEST_TIMEOUT_MS,
+    }, cres => { cres.resume(); resolve(); });
+    creq.on('timeout', () => creq.destroy(new Error('timeout')));
+    creq.on('error', e => resolve({ ok: false, error: '出站代理不可用: ' + e.message }));
+    creq.end();
+  });
+}
+
+function testProviderUpstream(p, u) {
   if (p.wire_api) { // codex(OpenAI 系):免费探活 GET <base>/models
     return new Promise(resolve => {
       const transport = u.protocol === 'https:' ? https : http;
       const creq = transport.request({
         protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: u.pathname.replace(/\/+$/, '') + '/models', method: 'GET', timeout: TEST_TIMEOUT_MS,
+        agent: upstreamAgent(u.protocol),
         headers: { 'Authorization': 'Bearer ' + p.api_key, 'User-Agent': DEFAULT_UA },
       }, cres => {
         const cs = []; cres.on('data', c => { if (cs.length < 64) cs.push(c); });
@@ -1741,6 +1800,7 @@ function testProvider(p) {
     const creq = transport.request({
       protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
       path: joinUpstreamPath(u.pathname, '/v1/messages'), method: 'POST', timeout: TEST_TIMEOUT_MS,
+      agent: upstreamAgent(u.protocol),
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
         'x-api-key': p.api_key, 'Authorization': 'Bearer ' + p.api_key,
         'User-Agent': DEFAULT_UA, 'anthropic-version': '2023-06-01' },
@@ -2065,6 +2125,10 @@ function apiHandler(req, res) {
       return send(200, { ok: true });
     }
 
+    if (req.method === 'POST' && p === '/api/claude/split') {
+      return send(200, configureClaudeSplit(await readObject()));
+    }
+
     // ---- 子代理槽位:查 / 改(值 null = 删除该槽;按组部分更新)
     if (req.method === 'GET' && p === '/api/slots') {
       return send(200, { slots: slotsPublic() });
@@ -2144,7 +2208,7 @@ module.exports = {
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
   // v3.2 子代理槽位
   slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
-  normalizeChannelSlots, CLAUDE_SLOT_KEYS,
+  normalizeChannelSlots, CLAUDE_SLOT_KEYS, claudeSplitPatch, configureClaudeSplit,
   // v3.2 渠道池主备策略
   pickMember, markCooldown, inCooldown,
   // v3.4 上游健康(熔断/冷却/超时)

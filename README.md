@@ -45,7 +45,7 @@
 ```bash
 npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter.pid)
 ./mixctl stop
-./mixctl status|ls|sessions|slots|logs [n]|route <claude|codex|zcode> [--slots]|open
+./mixctl status|ls|sessions|slots|split <主渠道ID> <主模型> <子代理渠道ID> <子代理模型> [--apply]|logs [n]|route <claude|codex|zcode> [--slots]|open
 ```
 
 - **代理端口 8787**,按端点自动分派到对应渠道组:
@@ -157,10 +157,11 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 想让 Claude Code 的后台任务走便宜渠道、子代理走指定模型,或给 Codex 的多角色 worker 各配各的上游?
 给槽位绑定「渠道 @ 模型」,客户端拿别名当模型名发请求,代理按槽位精确分发,**优先于一切路由规则**:
 
-- **Claude Code 四个固定槽**:`main`(写 `ANTHROPIC_MODEL`)/ `opus` / `sonnet` / `haiku`
-  (写对应 `ANTHROPIC_DEFAULT_*_MODEL`)。在控制台「渠道」页配置后点**「应用槽位到客户端」**,
-  env 写入别名(`mixr-opus` 等,自动备份;未配置槽的旧 `mixr-` 别名会被清掉,手设的真实模型名不动)。
-  此后 CC 的 Haiku 槽请求(标题生成、后台小任务、子代理)就会落到你选的渠道+模型上。
+- **Claude Code 六个固定槽**:`main`(写 `ANTHROPIC_MODEL`)/ `opus` / `sonnet` / `fable` / `haiku`
+  (写对应 `ANTHROPIC_DEFAULT_*_MODEL`)/ `subagent`(写 `CLAUDE_CODE_SUBAGENT_MODEL`)。
+  在控制台「渠道」页配置后点**「应用槽位到客户端」**,env 写入别名(`mixr-opus` 等,自动备份;
+  未配置槽的旧 `mixr-` 别名会被清掉,手设的真实模型名不动)。
+  此后 CC 的 Haiku 槽请求(标题生成、后台小任务)与子代理请求就会落到你选的渠道+模型上。
 - **Codex 自拟槽名**:如 `worker`、`reviewer`。客户端处于路由模式后直接用:
   `codex exec -m mixr-worker` 或 `codex --model mixr-reviewer`;`GET /v1/models` 也会列出这些别名。
 - 落点模型:Claude 槽绑定时选定;Codex 槽用渠道自带模型名。槽位请求不走会话粘性、不进渠道池,
@@ -173,6 +174,28 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 ./mixctl slots               # 查看槽位表(别名 → 渠道 @ 模型)
 ./mixctl route claude --slots   # 切路由模式并同时写入槽位 env
 ```
+
+### 主链 + 子代理双路(v3.5)
+
+「主链固定走便宜渠道(如 DeepSeek),子代理换来源(如 AgentRouter / anyrouter 的 Astra)」这类配置
+原先要在控制台逐槽绑定,容易漏改某一槽、也容易在主链上发生漂移。`/api/claude/split` 把它收成一次原子操作:
+
+```bash
+# 主链五个槽统一绑 DeepSeek,子代理单独绑 Astra,并写入客户端别名
+./mixctl split ds deepseek-v4-flash astra-a gpt-6-astra[1M] --apply
+# 之后只换子代理来源(主链一字不动,客户端 env 也不重写)
+./mixctl split subagent astra-b gpt-6-astra[1M] --apply
+```
+
+- 一次请求里 `main/opus/sonnet/fable/haiku` 五个槽绑定同一个「渠道 @ 模型」,`subagent` 单独绑一个——
+  这样任一副槽漏配都不会悄悄回落到主链模型上。
+- **换来源只改槽位表**:已在运行的进程下一次请求就读到新落点(读内存槽表),不必重启;
+  不带 `--apply` 时只落 `slots.json`,不碰客户端配置。
+- **两路各用各的 Key**:转发时按命中渠道取 `ANTHROPIC_AUTH_TOKEN`,客户端送来的 `PROXY_MANAGED`
+  或它自己的 token 不会顶替上游凭据——主链烧 DeepSeek 账号、子代理烧 Astra 账号,额度分开算。
+- **重启不回放旧快照**:客户端 env 只在 `--apply` 时写一次,进程启动只读 `slots.json`,
+  不会拿备份或启动时的快照反写槽位——这是原先「重启后子代理被改回旧模型」的根因。
+- 校验前置:渠道必须存在且启用,缺 `main` 时会明确要求先建立主链,而不是留下一半配置。
 
 ## 多 Key 渠道(同一渠道多账号)
 
@@ -362,6 +385,13 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
     首字节超时转移、流式空闲超时与非流式总超时掐断收尾(客户端不再挂死)、客户端中途断开掐上游
     +cancelled 日志、4xx 进冷却且分型、default 路由策略生效、加权池冷却恢复重进轮转、
     熔断开路后清掉冷却也不再选中、/api/health 视图、全池失败 502 状态如实落盘。
+  - **主链 + 子代理双路 v3.5**:同一会话连打六个槽别名——主链五槽全部走 Anthropic 上游并带
+    `[1M]` beta 头、子代理槽自动走 Responses 转换(补齐 `include/prompt_cache_key`),
+    两路 SSE 都收到完整收尾(`message_stop` / `response.completed`);每路用的都是自己渠道的 Key
+    (客户端送 `PROXY_MANAGED` 顶不掉),换子代理来源后主链与客户端别名一字不动;
+    子进程冷启动重载槽位表得到同样的两路落点、且不重写客户端配置。
+  - **出站代理**:CONNECT 隧道(明文与 TLS 两条路径、`Proxy-Authorization`、连接复用)、
+    代理拒连与代理进程消失时报错而非静默直连。
 - **真机端到端**(2026-09-10,真实 `claude` CLI 2.1.267 打本地 mock 上游,零成本):
   三个独立对话分别落到三个渠道的三个不同 key;`--continue` 续聊保持同一会话 id 与原渠道;
   手动改绑后下一个请求立即改道。
@@ -399,6 +429,8 @@ npm test                 # node --test test/*.test.js
   错误分型 err_class、客户端断开掐上游+cancelled 日志、/api/health 视图、default 策略与加权池恢复修正
   (本分支 `fix/upstream-lifecycle-health`,未发版)
 - [ ] 反向补齐(Claude 组渠道只开 chat 系上游时的翻译):尚未实现
+- [x] **v3.5 主链 + 子代理双路** — `/api/claude/split` 与 `mixctl split`:主链五槽统一绑定、
+  子代理独立换来源且不影响主链与客户端配置;两路各用各的 Key;`MIXR_UPSTREAM_PROXY` 出站 CONNECT 隧道
 
 ## License
 
@@ -408,4 +440,7 @@ npm test                 # node --test test/*.test.js
 
 - 本机代理为 fake-IP 模式(198.18.0.0/15):不存在的域名会被劫持,TLS 直接重置——
   测试渠道时用真实域名,「TLS 断连」多数是域名不存在而非网络故障。
+  这类网络里给 mixrouter 配上出站隧道:`MIXR_UPSTREAM_PROXY=http://127.0.0.1:7890`
+  (HTTP CONNECT 代理,支持 `user:pass@`;转发与渠道探活都走它,隧道与 TLS 连接保持复用,
+  隧道不通时渠道测试直接报「出站代理不可用」,不会用直连结果报"通")。
 - 响应头的值只能是 latin-1:渠道名里的非 ASCII 字符在 `x-mixrouter-*` 头里会被消洗(日志/控制台不受影响)。

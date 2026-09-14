@@ -167,6 +167,31 @@ async function slotsCmd() {
   for (const x of s.slots.codex) console.log(row('codex', x));
 }
 
+async function splitCmd(args) {
+  const apply = args.includes('--apply');
+  const values = args.filter(a => a !== '--apply');
+  let body;
+  if (values.length === 4) body = {
+    main: { provider: values[0], model: values[1] },
+    subagent: { provider: values[2], model: values[3] }, apply,
+  };
+  else if (values.length === 3 && values[0] === 'subagent') body = {
+    subagent: { provider: values[1], model: values[2] }, apply,
+  };
+  else {
+    console.log('用法: mixctl split <主渠道ID> <主模型> <子代理渠道ID> <子代理模型> [--apply]\n      mixctl split subagent <渠道ID> <模型> [--apply]');
+    process.exitCode = 1; return;
+  }
+  try {
+    const r = await apiPost('/api/claude/split', body);
+    for (const name of ['main', 'subagent']) {
+      const s = r.slots.find(x => x.name === name);
+      console.log(`${name}: ${s.provider_name} @ ${s.model}`);
+    }
+    console.log(r.applied ? '已写入 Claude Code 路由别名，请新开会话生效。' : '已保存槽位；未改客户端配置。首次接入用 mixctl route claude --slots。');
+  } catch (e) { console.log('双路配置失败:' + e.message); process.exitCode = 1; }
+}
+
 function logs(n = 20) {
   try {
     const lines = fs.readFileSync(REQ_LOG, 'utf8').trim().split('\n').slice(-Number(n));
@@ -186,7 +211,8 @@ else if (cmd === 'status') status();
 else if (cmd === 'ls') ls();
 else if (cmd === 'sessions' || cmd === 'sess') sessions();
 else if (cmd === 'slots') slotsCmd();
+else if (cmd === 'split') splitCmd(process.argv.slice(3));
 else if (cmd === 'logs') logs(process.argv[3]);
 else if (cmd === 'route') route(process.argv[3], process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : 'anthropic', process.argv.includes('--slots'));
 else if (cmd === 'open') execSync(`open http://127.0.0.1:${UI_PORT}`);
-else console.log(`用法: mixctl <start|stop|restart|status|ls|sessions|slots|logs [n]|route <claude|codex|zcode> [anthropic|responses|chat] [--slots]|open>`);
+else console.log(`用法: mixctl <start|stop|restart|status|ls|sessions|slots|split <主渠道ID> <主模型> <子代理渠道ID> <子代理模型> [--apply]|split subagent <渠道ID> <模型> [--apply]|logs [n]|route <claude|codex|zcode> [anthropic|responses|chat] [--slots]|open>`);
