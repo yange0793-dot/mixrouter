@@ -1024,7 +1024,7 @@ async function loadLogs() {
         <td>${esc(l.model_in)}${l.model_out && l.model_out !== l.model_in ? ' → ' + esc(l.model_out) : ''}</td>
         <td>${l.in || '-'}</td><td>${l.out || '-'}</td><td>${l.cache_read || '-'}</td>
         <td>${l.ms ? l.ms + 'ms' : '-'}</td><td class="${cls}">${l.status || '-'}</td>
-        <td style="color:var(--err)">${esc(l.err || '')}</td></tr>`;
+        <td style="color:var(--err)">${esc(l.err || '')}${l.err_class ? ` <span class="cool" title="失败分类 err_class">${esc(l.err_class)}</span>` : ''}</td></tr>`;
     }).join('');
     setLogError('logs', '');
   } catch (e) { if (sequence === logsSequence) setLogError('logs', '日志读取失败：' + e.message); }

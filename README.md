@@ -202,9 +202,39 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 
 相关环境变量:`MIXR_SESSION_TTL_MIN`(默认 720)、`MIXR_SESSION_MAX`(1000)、
 `MIXR_COOLDOWN_SEC`(60)、`MIXR_MAX_ATTEMPTS`(3)、`MIXR_SESSION_LABEL=0`(关掉对话标签采集)。
+超时/熔断/分型相关变量见下方「上游健康」一节。
 
 > 对话标签取自 Claude 的 system prompt 工作目录 / Codex 的首条用户消息(跳过
 > `<environment_context>` 一类注入块),**只存在内存里,不写进请求日志**;不需要可用 `MIXR_SESSION_LABEL=0` 关闭。
+
+## 上游健康(熔断 / 超时 / 取消收尾)
+
+失败转移与冷却之外,代理对每个渠道再维护一层**熔断器**(参考 cc-switch 的 circuit breaker):
+
+- **三段超时**,分别独立配置(默认都是 600 秒,与旧版单一超时一致):
+  `MIXR_FIRST_HEADER_TIMEOUT_MS` — 从发请求到收到响应头;超时即视为渠道故障,换下一个。
+  `MIXR_STREAM_IDLE_TIMEOUT_MS` — 流式响应两次数据之间的最大间隔;上游发完头就装死时掐断,
+  客户端不再无限干等。
+  `MIXR_NONSTREAM_TOTAL_TIMEOUT_MS` — 非流式响应从收到头到 body 结束的总时限。
+- **熔断器**:`MIXR_BREAKER_FAILURE_THRESHOLD`(默认 3)次连败(连不上/超时/5xx/429)把渠道
+  打入 open,时长与冷却一致(`MIXR_COOLDOWN_SEC`);期满进入 half-open,放行**一个**探测请求,
+  成功(`MIXR_BREAKER_RECOVERY_THRESHOLD`,默认 1 次)即闭合,失败立即重新 open。
+  4xx 算 rejected:证明渠道连通,只进冷却、不计熔断失败。开路期间该渠道不参与挑选
+  (全池都不可用时仍会兜底尝试,宁可重试也不死锁)。
+- **错误分型**:请求日志新增 `err_class` 字段——`authentication`(401/403)、`rate_limit`(429)、
+  `upstream_server`(5xx)、`upstream_request`(其余 4xx)、`timeout`、`econnrefused`/`econnreset` 等
+  网络错误码、`network_error`、`cancelled`(客户端主动断开)。转移成功的请求也带首次失败的
+  `err_class` + `failover` 标记(`err` 字段仍只记终态失败)。
+- **客户端断开**(ESC 取消 / 进程退出):代理立刻掐掉在途的上游请求,不再烧无人接收的额度;
+  该请求仍会落一条 `err_class: cancelled` 的日志(状态 499),且**不算**渠道失败。
+- **只读健康视图**:`GET /api/health` 返回三段超时/重试/熔断配置,以及每个渠道的
+  enabled/state/failures/lastOutcome/冷却截止/当前是否可选。
+- 路由修正:default(默认)路由现在**尊重自己配置的策略**(以前无视策略一律轮转);
+  加权池成员冷却恢复后会重新进入轮转(以前恢复的成员永远回不来);
+  无头无 metadata 的 Codex chat 请求按 system+首条用户消息取指纹身份(以前全部坍缩成同一个匿名会话)。
+
+已知限制:流式响应被掐断时只结束连接,**不补发**协议内 error 事件(客户端看到的是截断的 SSE);
+`MIXR_MAX_ATTEMPTS` 封顶的是池内渠道数,转换重试(`MIXR_CONV_RETRIES`)在同一渠道内单独计。
 
 ## Claude 组渠道走 Responses(v3.3)
 
@@ -293,6 +323,11 @@ AgentRouter copy 默认停用)。providers.json 含明文 key,权限 0600,已被
     (请求形状、SSE 事件顺序、工具调用翻译、usage 穿过翻译层)、chat 端点直通与 `wire_api_mismatch_error`、
     Codex 池会话粘性、失败转移、OpenAI 形状错误体、分组规则互不干扰、Codex 会话只能绑 Codex 组渠道、
     日志按分组过滤、`/v1/models` 与 HEAD 探活。
+  - **上游健康**:熔断器全生命周期单元(闭→开→半开→探测成功闭合/失败重开、代际守卫——迟到的
+    旧请求成功不能关上新开的熔断器、4xx rejected 清零失败计数、取消不计数)、错误分型、
+    首字节超时转移、流式空闲超时与非流式总超时掐断收尾(客户端不再挂死)、客户端中途断开掐上游
+    +cancelled 日志、4xx 进冷却且分型、default 路由策略生效、加权池冷却恢复重进轮转、
+    熔断开路后清掉冷却也不再选中、/api/health 视图、全池失败 502 状态如实落盘。
 - **真机端到端**(2026-09-10,真实 `claude` CLI 2.1.267 打本地 mock 上游,零成本):
   三个独立对话分别落到三个渠道的三个不同 key;`--continue` 续聊保持同一会话 id 与原渠道;
   手动改绑后下一个请求立即改道。
@@ -326,6 +361,9 @@ npm test                 # node --test test/*.test.js
   (`/v1/responses`、`/v1/chat/completions`)、Codex 会话粘性、responses⇄chat 协议翻译、一键路由模式
 - [x] **v3.3 Claude 组渠道走 Responses** — 渠道标 `wire_api: responses`,Claude Code 直接吃只挂
   Codex 型通道的模型(如 anyrouter `gpt-6-astra`);进程内双向转换 + 同渠道 key 轮换重试,免本地转换代理
+- [x] **v3.4 上游健康** — 三段超时(首字节/流式空闲/非流式总)、熔断器(阈值/半开探测/代际守卫)、
+  错误分型 err_class、客户端断开掐上游+cancelled 日志、/api/health 视图、default 策略与加权池恢复修正
+  (本分支 `fix/upstream-lifecycle-health`,未发版)
 - [ ] 反向补齐(Claude 组渠道只开 chat 系上游时的翻译):尚未实现
 
 ## License

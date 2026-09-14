@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
 
-const VERSION = '3.3.0';
+const VERSION = '3.4.0';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -36,7 +36,14 @@ const LOG_FILE = path.join(DATA_DIR, 'logs', 'requests.jsonl');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 // 请求体上限可用环境变量调小(测试用),默认 64MB
 const BODY_LIMIT = Number(process.env.MIXR_BODY_LIMIT_MB || 64) * 1024 * 1024;
-const UPSTREAM_TIMEOUT_MS = 600 * 1000;
+function envInt(name, fallback, min = 1, max = 2147483647) {
+  const raw = process.env[name];
+  const value = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+}
+const FIRST_HEADER_TIMEOUT_MS = envInt('MIXR_FIRST_HEADER_TIMEOUT_MS', 600000);
+const STREAM_IDLE_TIMEOUT_MS = envInt('MIXR_STREAM_IDLE_TIMEOUT_MS', 600000);
+const NONSTREAM_TOTAL_TIMEOUT_MS = envInt('MIXR_NONSTREAM_TOTAL_TIMEOUT_MS', 600000);
 const TEST_TIMEOUT_MS = 15 * 1000;
 const BETA_1M = 'context-1m-2025-08-07';
 // agentrouter 等网关校验 UA 形态,裸 curl 一律 401;客户端没带 UA 时用它兜底
@@ -59,11 +66,14 @@ const SLOTS_FILE = path.join(DATA_DIR, 'slots.json');
 const SESSION_TTL_MS = Number(process.env.MIXR_SESSION_TTL_MIN || 720) * 60 * 1000;
 const SESSION_MAX = Number(process.env.MIXR_SESSION_MAX || 1000);
 // 上游 429/5xx/连不上时把该渠道打入冷却,冷却期内不再被会话选中
-const COOLDOWN_MS = Number(process.env.MIXR_COOLDOWN_SEC || 60) * 1000;
-// 单次请求最多尝试几个渠道(池很大时兜住尾延迟)
-const MAX_ATTEMPTS = Number(process.env.MIXR_MAX_ATTEMPTS || 3);
-// Claude 组渠道翻成 Responses 后,同一渠道内的重试次数(轮换 prompt_cache_key 用)
-const CONV_RETRIES = Number(process.env.MIXR_CONV_RETRIES || 3);
+const COOLDOWN_MS = envInt('MIXR_COOLDOWN_SEC', 60, 0, 2147483) * 1000;
+// MAX_ATTEMPTS also caps actual network attempts, including conversion retries.
+const MAX_ATTEMPTS = envInt('MIXR_MAX_ATTEMPTS', 3, 1, 100);
+const CONV_RETRIES = envInt('MIXR_CONV_RETRIES', 3, 0, 100);
+const FAILURE_THRESHOLD = envInt('MIXR_BREAKER_FAILURE_THRESHOLD', 3, 1, 100);
+const RECOVERY_THRESHOLD = envInt('MIXR_BREAKER_RECOVERY_THRESHOLD', 1, 1, 100);
+const health = require('./lib/upstream-health').createHealth({ cooldownMs: COOLDOWN_MS,
+  failureThreshold: FAILURE_THRESHOLD, recoveryThreshold: RECOVERY_THRESHOLD });
 
 // Responses 型的 Codex 通道会用 prompt_cache_key 做渠道亲和(TTL 1 小时),坏渠道
 // 一旦钉上就整小时失败。key 按会话稳定(拿得到上游 prompt cache),失败时 +1 代。
@@ -347,7 +357,9 @@ function sessionIdentity(req, body, app = 'claude') {
     if (header) return { key: 'cx:' + header, kind: 'header' };
     const meta = codexBodySessionId(body);
     if (meta) return { key: 'cx:' + meta, kind: 'metadata' };
-    const seed = codexSystemText(body) + '\u0000' + codexFirstUserText(body);
+    const chatSystem = (body.messages || []).filter(m => m.role === 'system' || m.role === 'developer')
+      .map(m => typeof m.content === 'string' ? m.content : '').join('\n');
+    const seed = (codexSystemText(body) || chatSystem) + '\u0000' + (codexFirstUserText(body) || firstUserText(body));
     if (!seed.replace(/\u0000/g, '').trim()) return { key: 'cx-anon', kind: 'anon' };
     return { key: 'cxf:' + crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16), kind: 'fingerprint' };
   }
@@ -430,6 +442,23 @@ function markCooldown(providerId, status) {
   cooldowns[providerId] = Date.now() + COOLDOWN_MS;
 }
 const inCooldown = id => (cooldowns[id] || 0) > Date.now();
+const providerEligible = id => !inCooldown(id) && health.eligible(id);
+const retryableStatus = status => status === 429 || status >= 500;
+function errorClass(status, code = '') {
+  if (code) return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET'].includes(code) ? code.toLowerCase() : 'network_error';
+  if (status === 401 || status === 403) return 'authentication';
+  if (status === 429) return 'rate_limit';
+  if (status >= 500) return 'upstream_server';
+  return status >= 400 ? 'upstream_request' : '';
+}
+function healthStatus() {
+  return { settings: { first_header_timeout_ms: FIRST_HEADER_TIMEOUT_MS, stream_idle_timeout_ms: STREAM_IDLE_TIMEOUT_MS,
+    nonstream_total_timeout_ms: NONSTREAM_TOTAL_TIMEOUT_MS, max_attempts: MAX_ATTEMPTS, conversion_retries: CONV_RETRIES,
+    cooldown_ms: COOLDOWN_MS, failure_threshold: FAILURE_THRESHOLD, recovery_threshold: RECOVERY_THRESHOLD, half_open_max_probes: 1 },
+  providers: ['claude', 'codex'].flatMap(app => storeOf(app).map(p => ({ provider: p.id, app,
+    enabled: p.enabled !== false, ...health.view(p.id), cooldown_until: inCooldown(p.id) ? cooldowns[p.id] : 0,
+    eligible: p.enabled !== false && providerEligible(p.id) }))) };
+}
 
 // 把规则的 pool 归一化成 [{provider, model, weight}],只取本组(app)的渠道
 // 池成员里"不存在/已停用"的直接跳过(池的意义就是自动绕开不可用的);
@@ -490,42 +519,43 @@ function pickWeighted(members) {
   return best;
 }
 
-// 从池里给这个会话挑一个渠道;available 已排除冷却中的成员(除非全都在冷却)
+// 从池里给这个会话挑一个渠道:冷却/熔断中的成员不参与挑选;
+// 全池都不可用时退回全量兜底(宁可再试冷却渠道也不死锁)
 function pickMember(rule, members, key) {
-  const usable = members.filter(m => !inCooldown(m.provider.id));
-  const cands = usable.length ? usable : members;
-  if (cands.length === 1) return cands[0];
+  const cands = members.filter(m => providerEligible(m.provider.id));
+  const pool = cands.length ? cands : members;
+  if (pool.length === 1) return pool[0];
   const strat = strategyOf(rule);
   // priority(主备):永远取池序里第一个可用渠道,主渠道冷却中才落到下一个——失败降级语义
-  if (strat === 'priority') return cands[0];
-  if (strat === 'random') return cands[Math.floor(Math.random() * cands.length)];
+  if (strat === 'priority') return pool[0];
+  if (strat === 'random') return pool[Math.floor(Math.random() * pool.length)];
   if (strat === 'least_used') {
-    let best = cands[0];
-    for (const m of cands) if (activeCount(m.provider.id) < activeCount(best.provider.id)) best = m;
+    let best = pool[0];
+    for (const m of pool) if (activeCount(m.provider.id) < activeCount(best.provider.id)) best = m;
     return best;
   }
   const rid = (rule && rule.id) || '_';
   pools[rid] = pools[rid] || 0;
   if (strat === 'weighted') {
-    // 平滑加权轮询需要跨请求保留 current,按规则缓存一份可变副本
-    pools['__w_' + rid] = pools['__w_' + rid] || cands.map(m => ({ ...m, current: 0 }));
-    const w = pools['__w_' + rid];
-    for (const m of w) {
-      const src = cands.find(c => c.provider.id === m.provider.id);
-      m.weight = src ? src.weight : 1;
-    }
-    const alive = w.filter(m => cands.some(c => c.provider.id === m.provider.id));
-    if (!alive.length) return cands[0];
-    const chosen = pickWeighted(alive);
-    return (chosen && cands.find(c => c.provider.id === chosen.provider.id)) || cands[0];
+    // 平滑加权轮询需要跨请求保留 current;按当前候选重建,冷却恢复/新增的渠道能重新进入轮转
+    const wkey = '__w_' + rid;
+    const prev = Array.isArray(pools[wkey]) ? pools[wkey] : [];
+    const w = pool.map(m => {
+      const old = prev.find(x => x.provider.id === m.provider.id);
+      return old ? { ...m, current: old.current } : { ...m, current: 0 };
+    });
+    pools[wkey] = w;
+    return pickWeighted(w) || pool[0];
   }
   // round_robin:按会话数轮转,新会话依次落到不同渠道
-  const idx = (pools[rid]++) % cands.length;
-  return cands[idx];
+  const idx = (pools[rid]++) % pool.length;
+  return pool[idx];
 }
 
 // 拿到本会话该走的渠道:已有绑定且渠道仍可用 → 复用(粘性);否则挑一个并绑定
-function resolveSessionTarget(rule, members, key, label, kind, app = 'claude') {
+// fallbackStrategy 仅供日志兜底无规则对象时使用(default 路由也能带上配置的策略)
+function resolveSessionTarget(rule, members, key, label, kind, app = 'claude', fallbackStrategy) {
+  const effectiveRule = rule || { id: 'default', strategy: fallbackStrategy };
   pruneSessions();
   const now = Date.now();
   const bound = sessions.get(key);
@@ -540,12 +570,12 @@ function resolveSessionTarget(rule, members, key, label, kind, app = 'claude') {
       }
     }
     const m = members.find(x => x.provider.id === bound.providerId);
-    if (m && !inCooldown(bound.providerId)) {
+    if (m && providerEligible(bound.providerId)) {
       touch();
       return { member: m, sticky: true, rebind: false };
     }
   }
-  const picked = pickMember(rule, members, key);
+  const picked = pickMember(effectiveRule, members, key);
   return { member: picked, sticky: !!bound, rebind: true };
 }
 
@@ -1045,7 +1075,7 @@ function proxyHandler(req, res) {
     // 内容分流命中的请求不参与会话粘性:它只代表"这一条请求"走那条路,不代表对话换了渠道
     const target = resolved.content
       ? { member: members[0], sticky: false, rebind: false }
-      : resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind, ep.app);
+      : resolveSessionTarget(resolved.rule, members, ident.key, label, ident.kind, ep.app, resolved.strategy);
     const sess = sessionEntry(ident.key, ident.kind, members, label, ep.app);
     const wasSticky = target.sticky && !target.rebind;
     const ordered = [target.member]
@@ -1060,7 +1090,7 @@ function proxyHandler(req, res) {
       session: sessionKeyOf(ident.key), session_kind: ident.kind, rule: (resolved.rule && resolved.rule.id) || 'default',
       pool: members.length, strategy: resolved.strategy, sticky: wasSticky, attempts: 0, failover: false,
       in: 0, out: 0, cache_read: 0, ms: 0, status: 0, stream: !!body.stream,
-      kind: ep.kind, wire: '', err: '' };
+      kind: ep.kind, wire: '', err: '', err_class: '' };
 
     // 单次请求的收尾:计数入会话、写日志、收响应(所有终止路径都走这里,避免漏记)
     let finalized = false;
@@ -1074,11 +1104,27 @@ function proxyHandler(req, res) {
       saveSessionsSoon();
       logRequest(entry);
     };
-    const sendErr = (status, type, message) => {
+    const sendErr = (status, type, message, errClass) => {
       entry.status = status;
+      if (errClass) entry.err_class = errClass;
       if (!res.headersSent) protoError(res, ep.app, status, type, message);
       else { try { res.end(); } catch {} }
     };
+    // 客户端断开(ESC 取消/进程退出):掐掉在途的上游请求并按取消收尾——
+    // 不烧已无人接收的渠道额度,也不把客户端取消算成渠道失败;正常完成后 finalized 已置位,这里自然短路
+    let clientClosed = false, activeReq = null, activeRes = null, releaseCurrent = null;
+    res.on('close', () => {
+      if (finalized) return;
+      clientClosed = true;
+      if (releaseCurrent) releaseCurrent('cancelled');
+      try { if (activeReq) activeReq.destroy(); } catch {}
+      try { if (activeRes) activeRes.destroy(); } catch {}
+      entry.status = entry.status || 499;
+      entry.err = entry.err || 'client closed';
+      entry.err_class = 'cancelled';
+      entry.ms = Date.now() - started;
+      finalize();
+    });
 
     function tryCandidate(i) {
       const member = ordered[i];
@@ -1087,8 +1133,15 @@ function proxyHandler(req, res) {
       // claude 客户端落到 responses 型渠道:本进程内翻译(lib/wire-responses.js)
       const conv = wire === 'responses' && ep.kind === 'messages';
       const sessKey = sessionKeyOf(ident.key);
+      // 本次尝试的熔断许可:请求到达终态(成功/失败/取消)时归还,半开探测名额不泄漏
+      const breaker = health.acquire(provider.id);
+      const releaseBreaker = (outcome, error = '', status = 0) => {
+        if (breaker) breaker(outcome, error, status);
+      };
+      releaseCurrent = releaseBreaker;
       // count_tokens 在 responses 线上没有对应端点,本地按体积估一个(与旧转换代理同口径)
       if (ep.kind === 'count_tokens' && wire !== 'anthropic') {
+        releaseBreaker('success', '', 200);
         entry.attempts = i + 1; entry.provider = provider.name;
         entry.model_out = member.model || modelIn; entry.wire = wire; entry.status = 200;
         entry.in = Math.max(1, Math.ceil(rawLen / 4));
@@ -1121,31 +1174,53 @@ function proxyHandler(req, res) {
       const transport = upstream.protocol === 'https:' ? https : http;
       let done = false;
       // 还有后备渠道时,把这次失败记到冷却里再换下一个
-      const nextOrFail = (reason, errMsg) => {
+      const nextOrFail = (reason, errMsg, errClass) => {
+        // 客户端已断开:重试没有意义,也别把取消算成渠道失败
+        if (clientClosed) {
+          if (!finalized) {
+            entry.status = 499; entry.err = errMsg || 'client closed'; entry.err_class = 'cancelled';
+            entry.ms = Date.now() - started; finalize();
+          }
+          return;
+        }
         markCooldown(provider.id, reason);
+        releaseBreaker('failure', errMsg, reason || 0);
+        entry.err_class = errClass || errorClass(reason || 0, '') || 'network_error';
         if (i + 1 < ordered.length) { entry.failover = true; return tryCandidate(i + 1); }
-        entry.ms = Date.now() - started; entry.err = errMsg; finalize();
-        sendErr(502, 'api_error', `上游 ${provider.name} 请求失败: ${errMsg}`);
+        entry.ms = Date.now() - started; entry.err = errMsg;
+        entry.status = entry.status || 502;
+        finalize();
+        sendErr(entry.status, 'api_error', `上游 ${provider.name} 请求失败: ${errMsg}`, entry.err_class || 'upstream_server');
       };
       const creq = transport.request({
         protocol: upstream.protocol, hostname: upstream.hostname,
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
         path: joinUpstreamPath(upstream.pathname, upstreamPathOf(wire, ep)),
         method: 'POST', headers,
-        timeout: UPSTREAM_TIMEOUT_MS,
+        // 首字节(响应头)超时;流式空闲与非流式总超时分别由看门狗和 body 计时兜住
+        timeout: FIRST_HEADER_TIMEOUT_MS,
       }, cres => {
         if (done) return;
+        activeRes = cres;
         // 上游整体性故障(5xx / 限流)时,趁还没给客户端写任何字节重来:
         // 转换场景先在同一个渠道里换一代 prompt_cache_key(坏上游渠道会被亲和钉住),
         // 次数用完再换池里的下一个渠道
         if ((cres.statusCode >= 500 || cres.statusCode === 429) && ((conv && convRetries < CONV_RETRIES) || i + 1 < ordered.length)) {
           done = true;
           cres.resume(); // 排水丢弃,避免占住 socket
-          if (conv && convRetries < CONV_RETRIES) { convRetries++; rotateConvCacheGen(sessKey, provider.id); return tryCandidate(i); }
-          return nextOrFail(cres.statusCode, '');
+          if (conv && convRetries < CONV_RETRIES) { convRetries++; rotateConvCacheGen(sessKey, provider.id); releaseBreaker('failure', `http ${cres.statusCode}`, cres.statusCode); return tryCandidate(i); }
+          return nextOrFail(cres.statusCode, `HTTP ${cres.statusCode}`);
         }
         done = true;
         entry.status = cres.statusCode;
+        // 非重试类 HTTP 错误证明渠道连通/鉴权在正常工作,记为失败冷却但熔断不累计
+        if (cres.statusCode >= 400) {
+          markCooldown(provider.id, cres.statusCode);
+          entry.err_class = errorClass(cres.statusCode, '');
+          releaseBreaker('rejected', '', cres.statusCode);
+        } else {
+          releaseBreaker('success', '', cres.statusCode);
+        }
         entry.sticky = wasSticky && !entry.failover;
         // 落到这个渠道就把它记进会话(含失败转移后重新绑定),后续请求继续粘它
         if (cres.statusCode < 400 && !resolved.content && (sess.providerId !== provider.id || entry.failover)) {
@@ -1154,9 +1229,15 @@ function proxyHandler(req, res) {
         }
         const ct = String(cres.headers['content-type'] || 'application/json');
         const isSse = ct.includes('text/event-stream');
+        // 非流式总超时:从拿到响应头起算,整个 body 拖过上限就掐断
+        const totalTimer = isSse ? null : (NONSTREAM_TOTAL_TIMEOUT_MS ? setTimeout(() => {
+          try { cres.destroy(new Error('body timeout')); } catch {}
+        }, NONSTREAM_TOTAL_TIMEOUT_MS) : null);
         const finishEntry = u => {
+          if (totalTimer) clearTimeout(totalTimer);
           entry.ms = Date.now() - started;
           if (u) { entry.in = u.in || 0; entry.out = u.out || 0; entry.cache_read = u.cache_read || 0; }
+          if (!entry.err_class && entry.status >= 400) entry.err_class = errorClass(entry.status, '');
           finalize();
         };
         const outHeaders = {
@@ -1166,6 +1247,44 @@ function proxyHandler(req, res) {
           'x-mixrouter-model': safeHeader(model),
           'x-mixrouter-session': safeHeader(sessionKeyOf(ident.key)),
         };
+        // 流式空闲看门狗:上游发完响应头后长时间不出数据就掐断,不让客户端干等
+        let idleTimer = null;
+        // 响应体是否已完整结束;上面的 done 只表示"本次尝试已归属",响应转发可以还没走完
+        let responseDone = false;
+        // 转换重试会主动销毁当前上游流,那不是夭折(见下方 conv 分支)
+        let convRetrying = false;
+        const armIdle = () => {
+          if (!isSse || !STREAM_IDLE_TIMEOUT_MS) return;
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            if (responseDone) return;
+            try { cres.destroy(new Error('stream idle timeout')); } catch {}
+          }, STREAM_IDLE_TIMEOUT_MS);
+        };
+        const disarmIdle = () => { clearTimeout(idleTimer); idleTimer = null; };
+        // 上游响应中途夭折(空闲/总超时、连接重置):补记日志并掐断客户端响应,别让它干等
+        const upstreamDead = (why, errClass) => {
+          if (responseDone || convRetrying) return;
+          responseDone = true;
+          entry.err = entry.err || String(why);
+          entry.err_class = entry.err_class || errClass;
+          finishEntry();
+          if (!res.headersSent) sendErr(502, 'api_error', `上游 ${provider.name} 响应中断: ${why}`, errClass);
+          else if (!res.writableEnded) { try { res.end(); } catch {} }
+        };
+        cres.on('data', armIdle);
+        cres.on('end', () => { responseDone = true; disarmIdle(); });
+        cres.on('close', () => {
+          disarmIdle();
+          // 转换重试的销毁:close 先于 promise 微任务里的重试标记到达,推到下一拍再判
+          setImmediate(() => upstreamDead('连接中断', 'network_error'));
+        });
+        cres.on('error', e => {
+          disarmIdle();
+          const why = e.code || e.message;
+          setImmediate(() => upstreamDead(why, e.code ? errorClass(0, e.code) : (/timeout/i.test(String(why)) ? 'timeout' : 'network_error')));
+        });
+        armIdle();
 
         // responses 客户端 + chat 上游 = 现场翻译(错误体已是 OpenAI 形状,原样透传)
         if (wire === 'chat' && ep.kind === 'responses') {
@@ -1187,7 +1306,6 @@ function proxyHandler(req, res) {
               entry.cache_read = (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0;
             }, outHeaders);
             cres.on('end', () => finishEntry());
-            res.on('close', () => finishEntry());
           } else {
             const parts = [];
             cres.on('data', c => parts.push(c));
@@ -1231,14 +1349,13 @@ function proxyHandler(req, res) {
             wireResponses.relayAnthropicStream(cres, res, model, {
               mayRetry: !res.headersSent && convRetries < CONV_RETRIES, headers: outHeaders,
             }).then(r => {
-              if (r && r.retryable) { convRetries++; rotateConvCacheGen(sessKey, provider.id); entry.attempts = i + 1; return tryCandidate(i); }
+              if (r && r.retryable) { convRetrying = true; convRetries++; rotateConvCacheGen(sessKey, provider.id); entry.attempts = i + 1; return tryCandidate(i); }
               const u = (r && r.usage) || {};
               finishEntry({
                 in: u.input_tokens || 0, out: u.output_tokens || 0,
                 cache_read: (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0,
               });
             });
-            cres.on('close', () => finishEntry());
             return;
           }
           const parts = [];
@@ -1276,16 +1393,17 @@ function proxyHandler(req, res) {
           });
         }
       });
+      activeReq = creq;
       creq.on('timeout', () => {
         if (done) return;
         done = true;
         creq.destroy(new Error('timeout'));
-        nextOrFail(0, 'upstream timeout');
+        nextOrFail(0, `首字节超时(${Math.round(FIRST_HEADER_TIMEOUT_MS / 1000)}s)`, 'timeout');
       });
       creq.on('error', e => {
         if (done) return;
         done = true;
-        nextOrFail(0, e.message);
+        nextOrFail(0, e.code || e.message, e.code ? errorClass(0, e.code) : 'network_error');
       });
       creq.end(outBody);
     }
@@ -1655,6 +1773,10 @@ function apiHandler(req, res) {
           endpoints: ENDPOINTS.map(e => `${e.app === 'claude' ? 'Anthropic' : 'OpenAI'} ${e.path}`) },
       });
     }
+    // ---- 健康状态(只读:熔断器/冷却/超时与重试配置)
+    if (req.method === 'GET' && p === '/api/health') {
+      return send(200, healthStatus());
+    }
     // ---- 日志(支持过滤:app / provider 模型子串 / model 子串 / status=ok|err|具体码 / limit)
     if (req.method === 'GET' && p === '/api/logs') {
       const q = url.searchParams;
@@ -1969,6 +2091,8 @@ module.exports = {
   normalizeChannelSlots, CLAUDE_SLOT_KEYS,
   // v3.2 渠道池主备策略
   pickMember, markCooldown, inCooldown,
+  // v3.4 上游健康(熔断/冷却/超时)
+  health, healthStatus, errorClass, providerEligible,
   ROUTER_ID, ROUTER_URL, ROUTER_TOKEN, ROUTER_SECTION,
   _state: {
     get store() { return store; }, set store(v) { store = v; },
@@ -1978,6 +2102,7 @@ module.exports = {
     get cooldowns() { return cooldowns; }, set cooldowns(v) { cooldowns = v; },
     get slotMap() { return slotMap; }, set slotMap(v) { slotMap = v; },
     resetPools() { pools = {}; },
+    resetHealth() { health.clear(); },
     bindSession(key, providerId, extra = {}) {
       sessions.set(key, { providerId, model: '', ruleId: '', label: '', kind: 'header',
         created: Date.now(), lastUsed: Date.now(), reqs: 0, inTok: 0, outTok: 0, pinned: false, ...extra });
