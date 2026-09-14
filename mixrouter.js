@@ -43,6 +43,13 @@ function envInt(name, fallback, min = 1, max = 2147483647) {
   return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
 }
 const FIRST_HEADER_TIMEOUT_MS = envInt('MIXR_FIRST_HEADER_TIMEOUT_MS', 600000);
+// 兼容监听:旧客户端把 BASE_URL 写死到别的端口(如切换器/本地转换代理的端口)时,
+// 让本进程顺带在那个端口上也服务——接管时**正在跑**的会话不必重启。best-effort,占不到只告警。
+function altPorts(primary, ui) {
+  const ports = String(process.env.MIXROUTER_ALT_PORTS || '').split(',').map(s => Number(s.trim()))
+    .filter(p => Number.isInteger(p) && p > 0 && p < 65536 && p !== primary && p !== ui);
+  return [...new Set(ports)];
+}
 const STREAM_IDLE_TIMEOUT_MS = envInt('MIXR_STREAM_IDLE_TIMEOUT_MS', 600000);
 const NONSTREAM_TOTAL_TIMEOUT_MS = envInt('MIXR_NONSTREAM_TOTAL_TIMEOUT_MS', 600000);
 const TEST_TIMEOUT_MS = 15 * 1000;
@@ -2175,8 +2182,16 @@ function listen(port, handler, label) {
 // 被测试 require 时不自动起服务、不吞异常;只有直接运行才进入常驻模式
 if (require.main === module) {
   process.title = 'mixrouter';
-  Promise.all([listen(PROXY_PORT, proxyHandler, 'proxy'), listen(UI_PORT, apiHandler, 'ui')]).then(() => {
+  Promise.all([listen(PROXY_PORT, proxyHandler, 'proxy'), listen(UI_PORT, apiHandler, 'ui')]).then(async () => {
     console.log(`[mixrouter v${VERSION}] 代理 :${PROXY_PORT}(Claude /v1/messages · Codex /v1/responses)  控制台 http://${HOST}:${UI_PORT}  渠道 claude ${store.claude.length} / codex ${store.codex.length}`);
+    for (const port of altPorts(PROXY_PORT, UI_PORT)) {
+      try {
+        await listen(port, proxyHandler, `proxy-alt`);
+        console.log(`  兼容监听 :${port}(旧客户端指向的端口,同一份状态)`);
+      } catch (e) {
+        console.error(`  兼容监听 :${port} 未拿到(${e.code || e.message})——该端口上还有别的服务在跑,不影响主端口`);
+      }
+    }
   }).catch(e => {
     console.error(`启动失败: ${e.message}(端口 ${PROXY_PORT}/${UI_PORT} 是否被占用?)`);
     process.exit(1);
@@ -2208,7 +2223,7 @@ module.exports = {
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
   // v3.2 子代理槽位
   slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
-  normalizeChannelSlots, CLAUDE_SLOT_KEYS, claudeSplitPatch, configureClaudeSplit,
+  normalizeChannelSlots, CLAUDE_SLOT_KEYS, claudeSplitPatch, configureClaudeSplit, altPorts,
   // v3.2 渠道池主备策略
   pickMember, markCooldown, inCooldown,
   // v3.4 上游健康(熔断/冷却/超时)

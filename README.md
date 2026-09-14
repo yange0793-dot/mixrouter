@@ -73,6 +73,9 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
   `experimental_bearer_token` 模式,不依赖 auth.json),用户自己的 section 一律不碰;
   二次切换会清掉旧的 mixr section 不留垃圾。
 - **Claude.app 桌面端的配置永远不碰**(见旧训)。
+- **兼容监听**:`MIXROUTER_ALT_PORTS=15721`(逗号分隔)时,本进程在别的端口上也服务同一个代理——
+  用于接管「旧客户端把 BASE_URL 写死到旧代理端口」的场景,切换后**正在跑的会话不必重启**。
+  best-effort:端口被别人占着只告警,不影响主端口。
 
 ### 常驻(可选,launchd)
 
@@ -444,3 +447,10 @@ npm test                 # node --test test/*.test.js
   (HTTP CONNECT 代理,支持 `user:pass@`;转发与渠道探活都走它,隧道与 TLS 连接保持复用,
   隧道不通时渠道测试直接报「出站代理不可用」,不会用直连结果报"通")。
 - 响应头的值只能是 latin-1:渠道名里的非 ASCII 字符在 `x-mixrouter-*` 头里会被消洗(日志/控制台不受影响)。
+- **有网关校验客户端形态**:agentrouter.org 一类对 `User-Agent` 有硬要求(裸 `curl/…` 一律
+  `401 unauthorized client detected`),而 Codex 型通道只认 `codex_cli_rs/…`。渠道的 **UA 字段**
+  就是给这种上游固定 UA 用的——填上后无论客户端是谁都以该 UA 出站(实测:填 `claude-cli/…` 前
+  401、填后 200)。不填则沿用客户端自己的 UA,客户端没带才用兜底值。
+- **出网若是 TUN 模式**(如 Clash Verge 的 utun + fake-IP),系统级已经接管路由,
+  **不要再设** `MIXR_UPSTREAM_PROXY`——填一个没人监听的端口会把本来能通的上游全弄死。
+  端口式代理(HTTP CONNECT)才需要它。

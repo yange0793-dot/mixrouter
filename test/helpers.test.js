@@ -9,8 +9,17 @@ const path = require('node:path');
 // 隔离运行时数据目录,避免读到(更不能写到)仓库里的真实配置
 process.env.MIXR_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mixr-helpers-'));
 const {
-  VERSION, resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl, _state,
+  VERSION, resolveRoute, applyModel, safeHeader, extractUsage, maskKey, tomlStr, validBaseUrl, altPorts, _state,
 } = require('../mixrouter.js');
+
+test('altPorts:兼容监听端口解析,剔掉主端口/控制台/非法值并去重', () => {
+  process.env.MIXROUTER_ALT_PORTS = '15721, 8787, 8788, 0, abc, 70000, 15721';
+  assert.deepStrictEqual(altPorts(8787, 8788), [15721]);
+  process.env.MIXROUTER_ALT_PORTS = '';
+  assert.deepStrictEqual(altPorts(8787, 8788), []);
+  delete process.env.MIXROUTER_ALT_PORTS;
+  assert.deepStrictEqual(altPorts(8787, 8788), []);
+});
 
 test('applyModel 无 [1M] 后缀时原样返回且不动 headers', () => {
   const headers = {};
