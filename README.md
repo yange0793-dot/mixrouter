@@ -64,6 +64,10 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
 - **切换(Claude Code)**:只改 `~/.claude/settings.json` 的 env 里 `ANTHROPIC_BASE_URL /
   AUTH_TOKEN / MODEL`(+ 可选槽位 `ANTHROPIC_DEFAULT_OPUS/SONNET/FABLE/HAIKU_MODEL` 与
   `CLAUDE_CODE_SUBAGENT_MODEL`,渠道模型映射里没填就不动),其余键原样保留。
+  没填映射、而客户端当前还是 `mixr-*` 槽位别名的槽会一并清掉——否则直连之后客户端会把
+  `mixr-haiku` 当模型名发给真实上游;手设的真实模型名一律不碰。
+  标了 `wire_api: responses` 的渠道**会被拒绝切换**(它只挂 Codex 型通道,直连后
+  `/v1/messages` 必然失败),控制台里那颗按钮也是禁用的,请改用路由模式。
 - **切换(Codex)**:对 `~/.codex/config.toml` 做外科手术——顶层 `model / model_provider`
   原位替换,追加 `[model_providers.mixr-*]` section(沿用本机已验证的
   `experimental_bearer_token` 模式,不依赖 auth.json),用户自己的 section 一律不碰;
@@ -89,6 +93,24 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
 - 正常退出(exit 0)不会被拉起,`mixctl stop` 停得住;非正常退出(如 `kill -9`)由 launchd 在几秒内自愈;
 - `mixctl start` 检测到本机装了 `*.mixrouter.plist` 就直接 `launchctl kickstart`,不额外派生野进程;
 - 节点路径:脚本先找 `PATH` 里的 node,再兜底 `~/.nvm/versions/node/*/bin/node`。
+
+## 桌面应用(原生窗口,不用浏览器)
+
+控制台是本机网页,但不必用浏览器开——`scripts/build-app.sh` 把它包成一个原生 macOS 应用:
+
+```bash
+./scripts/build-app.sh                    # 编译 + 组装 + ad-hoc 签名 → ~/Applications/Mixrouter.app
+open ~/Applications/Mixrouter.app
+```
+
+- 单文件 AppKit + WKWebView(`app/MixrouterApp.swift`,约 300 行),只用 CommandLineTools 里的
+  `swiftc` 编,不装依赖、不联网;窗口位置大小记住,菜单栏有标准「编辑」菜单(网页里能复制 key)。
+- **只显示与遥控,不管服务生命周期**:启动先探 `/healthz`,已经在跑就只加载页面、**绝不重启**
+  (重启会打断正在跑的会话);探不到才 `./mixctl start` 并等就绪,起不来就把 `mixctl` 的原话摆在窗口里。
+  工具栏/菜单:重载(⌘R)、重启本地服务(带二次确认)、打开日志文件夹。
+- 仓库根烘进 `Info.plist` 的 `MixrouterRepoRoot`,应用靠它找 `mixctl` 与 `logs/`;
+  仓库挪了重建一次,或临时用 `MIXROUTER_REPO=/新/路径` 启动(另有 `MIXROUTER_CONSOLE_URL` 换控制台地址)。
+- 旧版浏览器唤起脚本保留在 `app/legacy-launcher.sh`,已改为自动定位仓库。
 
 ## 路由模式(让客户端走代理)
 
@@ -143,6 +165,9 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
   `codex exec -m mixr-worker` 或 `codex --model mixr-reviewer`;`GET /v1/models` 也会列出这些别名。
 - 落点模型:Claude 槽绑定时选定;Codex 槽用渠道自带模型名。槽位请求不走会话粘性、不进渠道池,
   渠道停用/删除会得到明确的 `provider_disabled_error` / `no_route_error`。
+- **槽位请求不改变对话的渠道**:它只代表"这一条请求"照槽位表走——既不会把对话重新绑到槽位渠道
+  (否则下一条主模型请求跟着跑偏、prompt 缓存被打断),被手动改绑过的对话也不会反过来把槽位
+  请求拽到被钉定的渠道上(那会把槽位的落点模型发给错的账号)。
 
 ```bash
 ./mixctl slots               # 查看槽位表(别名 → 渠道 @ 模型)
@@ -156,6 +181,10 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
 - 渠道里存一份 **Key 清单**(`keys: [{id, label, key}]`)+ 一个**生效 Key**(`active_key`);
   转发、渠道测试、「切换」写客户端用的永远是生效那把(`api_key` 与它恒等,老路径一行没改)。
 - 控制台渠道卡片的「API key」是一颗下拉:点一下即切账号,立即生效,不用重启。
+- **老式单 Key 渠道同样能用**:磁盘上只有 `api_key`、还没有清单的渠道,控制台会把它显示成一条
+  「账号1」(固定 id `klegacy`),卡片上也有下拉可点。在弹窗里「＋ 添加账号」加第二把时,
+  那条留空的「账号1」按原 Key 解析——老 Key 不会被新清单挤掉(旧版就是这么丢的)。
+  渠道一旦有清单,**弹窗顶栏那个单行 API Key 就不再参与保存**,清单是唯一真相。
 - 编辑弹窗里可增删改 Key(已有的留空=不改;同一把 Key 只存一条);控制台只拿得到掩码,明文不出网。
 - **与子代理槽位联动**:槽位的「渠道」选项显示所绑渠道当前生效的账号名——在渠道库里切了账号,
   上面槽位那一行跟着变;槽位绑的是渠道,换 Key 不需要重选槽位。
@@ -246,6 +275,8 @@ ZCode 流量在路由、会话、日志中按所选协议归组，不单独冒�
   请求方向 `system→instructions`、`tool_use→function_call`、`tool_result→function_call_output`、
   图片→`input_image`、`max_tokens→max_output_tokens`;响应方向把 Responses 的 JSON/SSE 译回
   Anthropic 的 `message` / `message_start…message_stop`(reasoning 事件丢弃,usage 穿过翻译层)。
+- 图片两处都转:消息体里的图片,以及 **`tool_result` 里的图片**(截图类工具的结果就是这种形状)。
+  带图的工具结果 `output` 用 `input_text`/`input_image` 内容数组,不带图的维持原来的纯字符串形状。
 - 顺带按真实 Codex 客户端的样子补齐这类通道的形状要求:`include:["reasoning.encrypted_content"]`、
   非空 `prompt_cache_key`、`store:false`,UA 换成 `codex_cli_rs/…`。
 - **同一渠道内自愈**:上游 5xx/429 且还没写出任何字节时,先轮换一代 `prompt_cache_key` 重试
@@ -286,6 +317,9 @@ Codex 只说 `/v1/responses`(0.153 起 `wire_api = "chat"` 已被上游客户端
   用来把"模型名相同、性质不同"的请求分开(典型:Claude Code 的上下文压缩请求走的还是主模型别名,
   请求体里带着固定的摘要提示词)。`match` 留空的 `when.body` 规则不限模型。
   命中的请求不参与会话粘性——只代表这一条请求走那条路,不代表这个对话换了渠道。
+  **匹配范围只到「system/instructions + 最后一条消息」,不含整段历史**:历史每轮都重发,
+  若拿整包 body 匹配,对话里偶然出现一次触发短语(实测:一条引用了规则原文的报告进了上下文)
+  就会让此后每条请求都改道、而且是永久的。压缩类请求的指令本就在最后一条消息里,照旧命中。
 - 目标模型留空 = 透传请求模型;带 `[1M]` 后缀 = 自动剥离并附加
   `anthropic-beta: context-1m-2025-08-07` 头(仅 Claude 通路)。
 - 渠道可配自定义 UA(优先级:渠道 UA > 客户端 UA > 兜底);
@@ -295,7 +329,7 @@ Codex 只说 `/v1/responses`(0.153 起 `wire_api = "chat"` 已被上游客户端
 ## 导入渠道(待用户确认后再执行)
 
 ```bash
-node ~/mixrouter/scripts/import-ccswitch.js ~/cc-switch-backup-20260801-002805/cc-switch.db
+node ./scripts/import-ccswitch.js ~/cc-switch-backup-20260801-002805/cc-switch.db
 ```
 
 导入 claude / codex 两组渠道(自动去重、剔除客户端自引用与无 key 条目;key 已失效的

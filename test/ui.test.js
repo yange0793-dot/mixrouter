@@ -163,6 +163,32 @@ test('provider search combines name, URL, models, slots and enabled-state filter
   assert.equal(search('missing-model'), 0);
 });
 
+test('多 Key 弹窗:老式单 Key 渠道预置「账号1」,顶栏那行不再覆盖生效 Key', async () => {
+  const data = fixture();
+  // 服务端 publicProvider 会把"只有 api_key"的老渠道合成一条固定 id 的「账号1」,夹具照这个形状给
+  data.providers.claude[0] = { ...data.providers.claude[0], has_key: true, key_masked: 'sk-leg…0001',
+    keys: [{ id: 'klegacy', label: '账号1', key_masked: 'sk-leg…0001' }], active_key: 'klegacy' };
+  const h = await harness(data);
+  assert.match(h.get('prov-grid').innerHTML, /<select class="keypick"/);   // 卡片上有可点的账号下拉
+  assert.match(h.get('prov-grid').innerHTML, /账号1/);
+
+  h.run("openProvider('a1')");
+  assert.equal(h.run('keyDraft.length'), 1);            // 不是空白清单:老 Key 看得见、留得住
+  assert.equal(h.run('keyDraft[0].id'), 'klegacy');
+  assert.match(h.get('m-key-hint').textContent, /清单/);
+
+  h.run('addKeyDraft()');
+  h.run("keyDraft[1].label = '账号2'; keyDraft[1].key = 'sk-second-0002'");
+  h.get('m-key').value = '';                            // 顶栏那个单行 API Key 留空
+  await h.run('saveProvider()');
+  const put = h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/providers/a1');
+  assert.equal(put.body.api_key, '', '有清单时顶栏那把不参与保存,免得覆盖生效 Key');
+  assert.deepEqual(put.body.keys, [
+    { id: 'klegacy', label: '账号1', key: '' },         // 留空=不改,由服务端解析回原 Key
+    { id: '', label: '账号2', key: 'sk-second-0002' },
+  ]);
+});
+
 test('ZCode create/edit saves use the selected protocol group, including chat default', async () => {
   const h = await harness();
   for (const [wire, group] of [['anthropic', 'claude'], ['responses', 'codex'], ['chat', 'codex']]) {

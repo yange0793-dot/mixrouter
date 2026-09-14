@@ -62,6 +62,28 @@ test('switchClaude 槽位模型只写非空槽,空槽保留现状', () => {
   assert.strictEqual(cfg.env.CLAUDE_CODE_SUBAGENT_MODEL, 'slot-subagent');
 });
 
+test('switchClaude 拒绝 wire_api=responses 的渠道(直连只有 Codex 型通道,必然打不通)', () => {
+  const baks = () => fs.readdirSync(TMP).filter(f => f.startsWith('settings.json.bak-mixui-')).length;
+  const before = fs.readFileSync(CLAUDE_SETTINGS, 'utf8');
+  const n = baks();
+  assert.throws(() => switchClaude({ ...CLAUDE_CHANNEL, wire_api: 'responses' }),
+    e => e.statusCode === 400 && /responses/.test(e.message));
+  assert.strictEqual(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'), before, '被拒时不得改动客户端配置');
+  assert.strictEqual(baks(), n, '被拒时也不该生成备份');
+});
+
+test('switchClaude 直连时清掉控制台托管的 mixr- 槽位别名,用户手设的值不动', () => {
+  const cfg0 = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'));
+  cfg0.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'mixr-haiku';    // 路由模式下控制台写入的别名
+  cfg0.env.CLAUDE_CODE_SUBAGENT_MODEL = '用户自己设的模型';  // 手设值,不该被清
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(cfg0, null, 2) + '\n');
+  switchClaude({ ...CLAUDE_CHANNEL, slots: { opus: 'slot-opus', sonnet: '', fable: '', haiku: '', subagent: '' } });
+  const cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8'));
+  assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'slot-opus');       // 渠道填了的照写
+  assert.strictEqual(cfg.env.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined);        // 别名清掉:否则客户端把 mixr-haiku 当模型名发给真实上游
+  assert.strictEqual(cfg.env.CLAUDE_CODE_SUBAGENT_MODEL, '用户自己设的模型');   // 非别名一律不碰
+});
+
 test('渠道 CRUD:slots 过 normalizeChannelSlots,fable/subagent 落库', async () => {
   const { normalizeChannelSlots } = require('../mixrouter.js');
   const norm = normalizeChannelSlots({ opus: ' a ', sonnet: null, fable: 'f[1M]', extra: 'x' });

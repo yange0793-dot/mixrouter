@@ -278,12 +278,49 @@ test('多 Key 渠道:清单只出掩码,切换生效 Key 后上游收到的就�
   // 改动前后老 Key 仍在清单里(切换不删 Key)
   assert.strictEqual(p2.keys.length, 2);
 
-  // 空值 Key 被拒;清单清空 = 退回单 Key
+  // 空值 Key 被拒;清单清空 = 退回单 Key(退回后状态里剩合成的那条「账号1」,值就是最后生效的那把)
   const bad = await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { keys: [{ label: 'x', key: '' }] } });
   assert.strictEqual(bad.status, 400);
   await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { keys: [] } });
   const cleared = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text).providers.claude.find(x => x.id === id);
-  assert.deepStrictEqual(cleared.keys, []);
+  assert.deepStrictEqual(cleared.keys.map(k => [k.id, k.key_masked]), [['klegacy', 'sk-acc…0002']]);
+  assert.strictEqual(cleared.active_key, 'klegacy');
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${id}`);
+  mod._state.routes = routesBackup.pop();
+});
+
+test('老式单 Key 渠道:控制台加第二把 Key 不会挤掉老 Key', async () => {
+  // 只带 api_key 建渠道(等同控制台里"只填了上面那一行"的老渠道,磁盘上没有 keys 清单)
+  const created = await rawRequest(uiPort, 'POST', '/api/providers', {
+    body: { app: 'claude', name: '老式单Key渠道', base_url: `http://127.0.0.1:${mockPort}`, api_key: 'sk-legacy-one-0001', models: ['claude-opus-5'] },
+  });
+  const id = JSON.parse(created.text).id;
+  routesBackup.push(mod._state.routes);
+  mod._state.routes = { rules: [{ id: 'rlg', match: 'lgprobe', provider: id, model: '', enabled: true }], default: { provider: '', model: '' } };
+
+  // 控制台看到的是合成的一条「账号1」——老渠道也有清单可点,不是空白
+  const before = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text).providers.claude.find(x => x.id === id);
+  assert.deepStrictEqual(before.keys.map(k => [k.id, k.label]), [['klegacy', '账号1']]);
+  assert.strictEqual(before.active_key, 'klegacy');
+
+  // 弹窗里「＋ 添加账号」加一行,老那行(id=klegacy)留空提交 —— 这正是老 Key 被挤掉的场景
+  const put = await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, {
+    body: { app: 'claude', api_key: '', keys: [{ id: 'klegacy', label: '账号1', key: '' }, { id: '', label: '账号2', key: 'sk-second-two-0002' }] },
+  });
+  assert.strictEqual(put.status, 200);
+  const after = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text).providers.claude.find(x => x.id === id);
+  assert.deepStrictEqual(after.keys.map(k => k.label), ['账号1', '账号2']);
+  assert.strictEqual(after.active_key, 'klegacy');
+  assert.strictEqual(after.key_masked, 'sk-leg…0001', '老 Key 必须还在,且仍是生效那把');
+
+  // 老 Key 真的还在转发里用:先确认上游收到老 Key,再切到账号2确认换成新 Key
+  await rawRequest(proxyPort, 'POST', '/v1/messages', { body: { model: 'lgprobe-1', max_tokens: 4, messages: [{ role: 'user', content: 'hi' }] } });
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-legacy-one-0001');
+  const key2 = after.keys.find(k => k.label === '账号2').id;
+  assert.strictEqual((await rawRequest(uiPort, 'PUT', `/api/providers/${id}`, { body: { active_key: key2 } })).status, 200);
+  await rawRequest(proxyPort, 'POST', '/v1/messages', { body: { model: 'lgprobe-2', max_tokens: 4, messages: [{ role: 'user', content: 'hi' }] } });
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-second-two-0002');
+
   await rawRequest(uiPort, 'DELETE', `/api/providers/${id}`);
   mod._state.routes = routesBackup.pop();
 });
@@ -337,4 +374,61 @@ test('控制台 API:PUT /api/routes 持久化并生效', async () => {
   // 还原为文件初始路由,保证测试幂等
   const restore = await rawRequest(uiPort, 'PUT', '/api/routes', { body: fileRoutes });
   assert.strictEqual(JSON.parse(restore.text).ok, true);
+});
+
+// ---- 槽位请求与会话绑定/手动改绑的相互作用(两条都在修 rebind 劫持)----
+const mkClaudeProvider = async (name, key) => JSON.parse((await rawRequest(uiPort, 'POST', '/api/providers', {
+  body: { app: 'claude', name, base_url: `http://127.0.0.1:${mockPort}`, api_key: key, models: ['claude-opus-5'] },
+})).text).id;
+const claudeSend = (model, sessionId) => rawRequest(proxyPort, 'POST', '/v1/messages', {
+  headers: { 'Content-Type': 'application/json', 'x-claude-code-session-id': sessionId },
+  body: { model, max_tokens: 4, messages: [{ role: 'user', content: 'hi' }] },
+});
+
+test('槽位请求不改写会话绑定:主模型仍留在原渠道', async () => {
+  const slotId = await mkClaudeProvider('槽位渠道', 'sk-slot-h-0003');
+  const poolB = await mkClaudeProvider('池成员B', 'sk-pool-b-0002');
+  const rulesSave = mod._state.routes;
+  const slotsSave = structuredClone(mod._state.slotMap);
+  mod._state.routes = { rules: [{ id: 'rpool', match: 'poolprobe', pool: [{ provider: 'p1' }, { provider: poolB }], strategy: 'round_robin', enabled: true }], default: { provider: '', model: '' } };
+  mod._state.slotMap = { claude: { haiku: { provider: slotId, model: 'haiku-target' } }, codex: {} };
+  mod._state.resetPools();
+  mod._state.sessions.delete('cc:slotstick1');
+
+  await claudeSend('poolprobe-1', 'slotstick1');
+  const mainKey = mock.requests.at(-1).headers['x-api-key'];
+  assert.ok(['sk-test-p1', 'sk-pool-b-0002'].includes(mainKey), '主请求应落在池成员上');
+  // 同一对话发一条槽位请求(Claude Code 每个对话开头都会发 haiku 档的起标题请求)
+  await claudeSend('mixr-haiku', 'slotstick1');
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-slot-h-0003', '槽位请求要走槽位渠道');
+  assert.strictEqual(mock.requests.at(-1).body.model, 'haiku-target', '槽位渠道收到的是槽位的落点模型');
+  // 关键:槽位请求不能把对话挪走,否则下一条主模型请求跟着跑偏、prompt 缓存被打破
+  await claudeSend('poolprobe-2', 'slotstick1');
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], mainKey, '槽位请求之后主模型仍走原渠道');
+
+  mod._state.routes = rulesSave;
+  mod._state.slotMap = slotsSave;
+  mod._state.sessions.delete('cc:slotstick1');
+  mod._state.resetPools();
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${slotId}`);
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${poolB}`);
+});
+
+test('被「手动改绑」的会话不劫持槽位请求', async () => {
+  const slotId = await mkClaudeProvider('槽位渠道2', 'sk-slot-pin-0004');
+  const rulesSave = mod._state.routes;
+  const slotsSave = structuredClone(mod._state.slotMap);
+  mod._state.routes = { rules: [{ id: 'rpin', match: 'pinprobe', provider: 'p1', model: '', enabled: true }], default: { provider: '', model: '' } };
+  mod._state.slotMap = { claude: { haiku: { provider: slotId, model: 'haiku-target' } }, codex: {} };
+  // 把该对话钉在 p1 上(控制台「改绑」),再发槽位别名
+  mod._state.bindSession('cc:slotpin1', 'p1', { pinned: true });
+
+  await claudeSend('mixr-haiku', 'slotpin1');
+  assert.strictEqual(mock.requests.at(-1).headers['x-api-key'], 'sk-slot-pin-0004', '钉定不该把槽位请求拽到被钉定的渠道');
+  assert.strictEqual(mock.requests.at(-1).body.model, 'haiku-target');
+
+  mod._state.routes = rulesSave;
+  mod._state.slotMap = slotsSave;
+  mod._state.sessions.delete('cc:slotpin1');
+  await rawRequest(uiPort, 'DELETE', `/api/providers/${slotId}`);
 });

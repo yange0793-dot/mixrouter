@@ -20,7 +20,7 @@ process.env.MIXR_MAX_ATTEMPTS = '3';
 
 const mod = require('../mixrouter.js');
 const {
-  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule,
+  sessionIdentity, sessionLabel, parseSessionId, matchWhen, normalizeRule, bodyRouteText,
   strategyOf, buildUpstreamHeaders, clientToken, applyLabel, _state,
 } = mod;
 
@@ -189,6 +189,49 @@ test('matchWhen:空条件恒真,条件为子串且大小写不敏感', () => {
   assert.strictEqual(matchWhen({ when: { body: 'x' } }, {}), false);
   // body 与其它条件同时给出时为「与」
   assert.strictEqual(matchWhen({ when: { body: 'summary', ua: 'claude-cli' } }, { ua: 'curl/8', bodyText: () => 'summary' }), false);
+});
+
+test('bodyRouteText:只拼 system/instructions 与最后一条消息,不碰历史', () => {
+  assert.strictEqual(bodyRouteText({}), '');
+  assert.strictEqual(bodyRouteText({ messages: [{ role: 'user', content: 'only' }] }), 'only');
+  assert.strictEqual(bodyRouteText({
+    system: 'SYS',
+    messages: [{ role: 'user', content: 'old mention of detailed summary' }, { role: 'user', content: 'last' }],
+  }), 'SYS\nlast');
+  assert.strictEqual(bodyRouteText({
+    system: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }],
+  }), 'a\nb\n[{"type":"text","text":"x"}]');
+  // Codex(Responses)形状:instructions + input 数组的最后一项
+  assert.strictEqual(bodyRouteText({
+    instructions: 'codex',
+    input: [{ type: 'message', content: [{ type: 'input_text', text: 'head' }] }, { type: 'message', content: [{ type: 'input_text', text: 'tail' }] }],
+  }), 'codex\n[{"type":"input_text","text":"tail"}]');
+});
+
+test('when.body 只看最后一条消息:历史里出现过触发短语,不再劫持后续请求', async () => {
+  setRoutes([
+    { id: 'rnorm', match: 'claude-opus-5', provider: 'pb', model: '', enabled: true },
+    { id: 'rcompact', match: '', provider: 'pa', model: 'deepseek-x', enabled: true, when: { body: 'detailed summary of the conversation' } },
+  ], { provider: 'pb', model: '' });
+
+  // 历史里引用了规则原文(实测踩过的形状:一条引用了 when.body 的报告进了对话)
+  const hist = await callWithSession('bodyhist1', { body: { messages: [
+    { role: 'user', content: '（引用）压缩走 rcompact:when.body = "detailed summary of the conversation"' },
+    { role: 'assistant', content: '收到' },
+    { role: 'user', content: '继续干活' },
+  ] } });
+  assert.strictEqual(hist.key, 'sk-b', '历史里的短语不该命中内容分流');
+  assert.strictEqual((await lastLog()).rule, 'rnorm');
+
+  // 真正的压缩请求:指令就在最后一条消息里,照旧命中
+  const real = await callWithSession('bodyhist2', { body: { messages: [
+    { role: 'user', content: '先前的上下文略' },
+    { role: 'user', content: 'Your task is to create a detailed summary of the conversation so far' },
+  ] } });
+  assert.strictEqual(real.key, 'sk-a', '压缩指令在最后一条消息里,必须照旧命中');
+  assert.strictEqual((await lastLog()).rule, 'rcompact');
+  assert.strictEqual(mock.requests.at(-1).body.model, 'deepseek-x');
 });
 
 test('normalizeRule:补默认值、剔除坏池成员、收敛枚举与类型', () => {

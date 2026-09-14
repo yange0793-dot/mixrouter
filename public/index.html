@@ -557,7 +557,9 @@ function renderProviders() {
     const tline = !t ? '' : t.wait ? '<div class="testline wait" role="status">测试中…</div>' : `<div class="testline ${t.ok ? 'ok' : 'err'}" role="status">上次测试${t.ok ? '通过' : '失败'} · ${esc(t.ok ? `${t.status} · ${t.ms}ms${t.model ? ' · ' + t.model : ''}` : t.error || ('HTTP ' + t.status))}${!t.ok && t.body ? ' · ' + esc(t.body.slice(0, 120)) : ''}</div>`;
     const models = group === 'claude' ? (p.models || []) : [p.model].filter(Boolean);
     const wire = group === 'claude' ? (p.wire_api === 'responses' ? 'responses（转换）' : 'anthropic') : p.wire_api || 'responses';
-    const arg = handlerArg(p.id), locked = !online || (isZcode && !zcodeSupported());
+    // responses 渠道只挂 Codex 型通道,直连写进客户端必然失败(服务端也会拒),按钮直接封掉
+    const convOnly = group === 'claude' && p.wire_api === 'responses';
+    const arg = handlerArg(p.id), locked = !online || (isZcode && !zcodeSupported()) || convOnly;
     return `<article class="card ${p.enabled ? '' : 'off'} ${verified ? 'cur' : ''}">
       <div class="top"><span class="cdot" aria-hidden="true"></span><h3 class="name">${esc(p.name)}</h3>${isCur ? `<span class="badge ${verified ? 'on' : 'off'}">${verified ? '已写入配置' : '库内选中'}</span>` : ''}${drift && online ? '<span class="badge drift">配置不一致</span>' : ''}<span class="badge ${p.enabled ? 'info' : 'off'}">${p.enabled ? '启用' : '停用'}</span></div>
       <div class="mono endpoint">${esc(p.base_url)}</div><div class="tags"><span class="tag">${esc(wire)}</span>${models.map(m => `<span class="tag">${esc(m)}</span>`).join('')}${p.drop_images ? '<span class="tag">纯文本</span>' : ''}</div>
@@ -566,7 +568,7 @@ function renderProviders() {
         ? `<select class="keypick" data-provider="${esc(p.id)}" data-action="key" aria-label="${esc(p.name)} 当前账号" onchange="setActiveKey(${arg},this.value)">${p.keys.map(k => `<option value="${esc(k.id)}" ${k.id === p.active_key ? 'selected' : ''}>${esc(k.label)} · ${esc(k.key_masked)}</option>`).join('')}</select><span class="muted">（${(p.keys || []).length} 个账号）</span>`
         : esc(p.key_masked || '未配置')}</div>${p.note ? `<p class="note">${esc(p.note)}</p>` : ''}
       ${isZcode && group === 'codex' && wire !== zcodeWire ? `<p class="note">此渠道按 ${esc(wire)} 协议接入，与上方路由协议选择不同。</p>` : ''}${tline}
-      <div class="foot"><button class="small ${verified ? 'cur' : 'primary'}" data-action="switch" data-provider="${esc(p.id)}" onclick="switchProvider(${arg})" ${locked ? 'disabled' : ''}>${isZcode ? '接入 ZCode' : isCur ? '重新写入' : '切换'}</button><button class="small" data-action="test" data-provider="${esc(p.id)}" onclick="testProvider(${arg})" ${!online || t?.wait ? 'disabled' : ''}>测试</button><button class="small" data-action="edit" data-provider="${esc(p.id)}" onclick="openProvider(${arg})">编辑</button><button class="small" data-action="toggle" data-provider="${esc(p.id)}" onclick="toggleProvider(${arg})" ${!online ? 'disabled' : ''}>${p.enabled ? '停用' : '启用'}</button><button class="small danger" data-action="delete" data-provider="${esc(p.id)}" onclick="delProvider(${arg})" ${!online ? 'disabled' : ''}>删除</button></div></article>`;
+      <div class="foot"><button class="small ${verified ? 'cur' : 'primary'}" data-action="switch" data-provider="${esc(p.id)}" onclick="switchProvider(${arg})" ${locked ? 'disabled' : ''} title="${convOnly ? '该渠道只挂 Codex 型通道，直连不可用：请用上方「路由模式」' : ''}">${isZcode ? '接入 ZCode' : isCur ? '重新写入' : '切换'}</button><button class="small" data-action="test" data-provider="${esc(p.id)}" onclick="testProvider(${arg})" ${!online || t?.wait ? 'disabled' : ''}>测试</button><button class="small" data-action="edit" data-provider="${esc(p.id)}" onclick="openProvider(${arg})">编辑</button><button class="small" data-action="toggle" data-provider="${esc(p.id)}" onclick="toggleProvider(${arg})" ${!online ? 'disabled' : ''}>${p.enabled ? '停用' : '启用'}</button><button class="small danger" data-action="delete" data-provider="${esc(p.id)}" onclick="delProvider(${arg})" ${!online ? 'disabled' : ''}>删除</button></div></article>`;
   }).join('');
   // Avoid detaching focused card buttons or modal return targets on a status poll.
   const grid = $('prov-grid');
@@ -586,8 +588,12 @@ function openProvider(id) {
   $('m-description').textContent = curApp === 'zcode' ? '这是共享渠道库，修改对 Claude Code / Codex 同样可见。保存渠道不会写入 ZCode；请在渠道卡片上点击「接入 ZCode」。' : '保存到渠道库后，通过渠道卡片写入客户端配置。Claude 模型列表第一项作为主模型。';
   $('m-base-hint').textContent = isCodex ? '（通常包含 /v1）' : '';
   $('m-name').value = editing?.name || ''; $('m-base').value = editing?.base_url || ''; $('m-key').value = '';
-  $('m-key-hint').textContent = editing ? '（留空保持不变，当前 ' + (editing.key_masked || '未配置') + '）' : '';
+  // 清单是唯一真相:渠道一旦有清单(老式单 Key 渠道也会合成一条「账号1」),顶栏那个单行
+  // API Key 就不参与保存了——否则服务端会把它当成"改当前生效那把",悄悄覆盖掉账号1
   keyDraft = (editing?.keys || []).map(k => ({ id: k.id, label: k.label, key: '', masked: k.key_masked }));
+  $('m-key-hint').textContent = !editing ? ''
+    : keyDraft.length ? '（多 Key 渠道请在下方清单里改，这里不参与保存）'
+    : '（留空保持不变，当前 ' + (editing.key_masked || '未配置') + '）';
   $('m-keys-wrap').style.display = editing ? '' : 'none';
   renderKeyDraft();
   $('m-claude-fields').style.display = isCodex ? 'none' : ''; $('m-codex-fields').style.display = isCodex ? '' : 'none';
@@ -623,7 +629,7 @@ async function saveProvider() {
   if (savingProvider) return;
   if (!online) return toast('控制台离线，表单已保留，请连接后保存', 'err');
   if (!$('provider-form').reportValidity()) return;
-  const body = { app: editingGroup, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(), api_key: $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
+  const body = { app: editingGroup, name: $('m-name').value.trim(), base_url: $('m-base').value.trim(), api_key: keyDraft.length ? '' : $('m-key').value, note: $('m-note').value, enabled: $('m-enabled').checked };
   if (editingGroup === 'codex') { body.model = $('m-model').value.trim(); body.wire_api = $('m-wire').value; body.drop_images = $('m-dropimg').checked; }
   else { body.models = $('m-models').value; body.wire_api = $('m-wire-claude').value; body.slots = { opus: $('m-slot-opus').value.trim(), sonnet: $('m-slot-sonnet').value.trim(), fable: $('m-slot-fable').value.trim(), haiku: $('m-slot-haiku').value.trim(), subagent: $('m-slot-subagent').value.trim() }; }
   if (!body.name || !body.base_url) return toast('名称与 Base URL 必填', 'err');
