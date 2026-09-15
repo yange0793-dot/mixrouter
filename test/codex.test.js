@@ -246,7 +246,9 @@ test('classifyProxyRequest / wireOf:端点与协议归属', () => {
   assert.strictEqual(classifyProxyRequest({ url: '/v1/embeddings' }), null);
   assert.strictEqual(wireOf({ wire_api: 'chat' }, 'codex'), 'chat');
   assert.strictEqual(wireOf({}, 'codex'), 'responses');
-  assert.strictEqual(wireOf({ wire_api: 'chat' }, 'claude'), 'anthropic');
+  assert.strictEqual(wireOf({ wire_api: 'chat' }, 'claude'), 'chat');
+  assert.strictEqual(wireOf({ wire_api: 'responses' }, 'claude'), 'responses');
+  assert.strictEqual(wireOf({ wire_api: 'bogus' }, 'claude'), 'anthropic'); // 未知值按默认直连
 });
 
 test('buildOpenAiHeaders:带 Bearer 与客户端 UA,不撒 Anthropic 头,透传会话 id', () => {

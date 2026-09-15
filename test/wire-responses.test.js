@@ -454,9 +454,9 @@ test('上游错误体翻成 Anthropic 形状(Claude Code 才认)', async () => {
 });
 
 test('渠道 API:claude 组可以设 wire_api=responses,非法值被拒', async () => {
-  const bad = await rawRequest(uiPort, 'PUT', '/api/providers/p1', { body: { wire_api: 'chat' } });
+  const bad = await rawRequest(uiPort, 'PUT', '/api/providers/p1', { body: { wire_api: 'bogus' } });
   assert.strictEqual(bad.status, 400);
-  assert.ok(JSON.parse(bad.text).error.includes('anthropic 或 responses'));
+  assert.ok(JSON.parse(bad.text).error.includes('anthropic'));
   const okPut = await rawRequest(uiPort, 'PUT', '/api/providers/p1', { body: { wire_api: 'anthropic' } });
   assert.strictEqual(JSON.parse(okPut.text).ok, true);
   const st = JSON.parse((await rawRequest(uiPort, 'GET', '/api/state')).text);

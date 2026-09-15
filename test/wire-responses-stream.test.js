@@ -339,3 +339,79 @@ test('tool_choice:none 原样传 none,不许变成 auto', () => {
   assert.strictEqual(wire.anthropicToResponses({ ...base, tool_choice: { type: 'any' } }).tool_choice, 'required');
   assert.deepStrictEqual(wire.anthropicToResponses({ ...base, tool_choice: { type: 'tool', name: 'T' } }).tool_choice, { type: 'function', name: 'T' });
 });
+
+// ---------------------------------------------------------------- 思考转发
+test('思考转发:reasoning 事件进 thinking 块(正文之前),以空 signature 收尾', async () => {
+  const up = upstreamFake(); const res = sink();
+  const p = relay(up, res, { mayRetry: false });
+  up.write(sse({ type: 'response.created', response: { id: 'r1', model: 'qwen3.8-flash' } }));
+  up.write(sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs1' } }));
+  up.write(sse({ type: 'response.reasoning_text.delta', output_index: 0, delta: '想一下' }));
+  up.write(sse({ type: 'response.reasoning_text.delta', output_index: 0, delta: '…' }));
+  up.write(sse({ type: 'response.output_item.added', output_index: 1, item: { type: 'message', id: 'm1' } }));
+  up.write(sse({ type: 'response.output_text.delta', output_index: 1, delta: '好' }));
+  up.write(sse({ type: 'response.completed', response: { id: 'r1', status: 'completed', output: [], usage: { input_tokens: 5, output_tokens: 9 } } }));
+  const r = await p;
+
+  const evs = parseSse(res.text);
+  const starts = evs.filter(e => e.name === 'content_block_start');
+  assert.strictEqual(starts[0].json.content_block.type, 'thinking', '思考块必须在正文块之前');
+  assert.strictEqual(starts[1].json.content_block.type, 'text');
+  const think = evs.filter(e => e.name === 'content_block_delta' && e.json.delta.type === 'thinking_delta')
+    .map(e => e.json.delta.thinking).join('');
+  assert.strictEqual(think, '想一下…', '思考内容要完整转发(思考关不掉的模型,这是花钱买的能力)');
+  const sig = evs.filter(e => e.name === 'content_block_delta' && e.json.delta.type === 'signature_delta');
+  assert.strictEqual(sig.length, 1, 'thinking 块要以 signature_delta 收尾');
+  assert.strictEqual(sig[0].json.delta.signature, '');
+  const text = evs.filter(e => e.name === 'content_block_delta' && e.json.delta.type === 'text_delta')
+    .map(e => e.json.delta.text).join('');
+  assert.strictEqual(text, '好', '思考不得混进正文');
+  assert.strictEqual(r.aborted, false);
+});
+
+test('思考转发:reasoning_summary_text.delta(标准事件名)同样认', async () => {
+  const up = upstreamFake(); const res = sink();
+  const p = relay(up, res, { mayRetry: false });
+  up.write(sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs1' } }));
+  up.write(sse({ type: 'response.reasoning_summary_text.delta', output_index: 0, delta: '摘要思考' }));
+  up.write(sse({ type: 'response.output_text.delta', output_index: 1, delta: '答' }));
+  up.write(sse({ type: 'response.completed', response: { id: 'r1', status: 'completed', output: [], usage: {} } }));
+  await p;
+  const think = parseSse(res.text).filter(e => e.name === 'content_block_delta' && e.json.delta.type === 'thinking_delta')
+    .map(e => e.json.delta.thinking).join('');
+  assert.strictEqual(think, '摘要思考');
+});
+
+test('思考转发:只有思考没有正文(全花在 reasoning)也要正常收尾', async () => {
+  const up = upstreamFake(); const res = sink();
+  const p = relay(up, res, { mayRetry: false });
+  up.write(sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs1' } }));
+  up.write(sse({ type: 'response.reasoning_text.delta', output_index: 0, delta: '全花在思考上' }));
+  up.write(sse({ type: 'response.completed', response: { id: 'r1', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [], usage: {} } }));
+  const r = await p;
+  const evs = parseSse(res.text);
+  assert.strictEqual(evs.filter(e => e.name === 'content_block_start')[0].json.content_block.type, 'thinking');
+  assert.ok(evs.some(e => e.name === 'content_block_stop'));
+  assert.strictEqual(evs.find(e => e.name === 'message_delta').json.delta.stop_reason, 'max_tokens');
+  assert.strictEqual(r.aborted, false);
+});
+
+test('思考转发:思考块之后的工具块不得把 signature 挤掉', async () => {
+  const up = upstreamFake(); const res = sink();
+  const p = relay(up, res, { mayRetry: false });
+  up.write(sse({ type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs1' } }));
+  up.write(sse({ type: 'response.reasoning_text.delta', output_index: 0, delta: '先想' }));
+  up.write(sse({ type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', call_id: 'c1', name: 'Bash' } }));
+  up.write(sse({ type: 'response.function_call_arguments.delta', output_index: 1, delta: '{"cmd":"ls"}' }));
+  up.write(sse({ type: 'response.output_item.done', output_index: 1, item: { type: 'function_call', call_id: 'c1', name: 'Bash', arguments: '{"cmd":"ls"}' } }));
+  up.write(sse({ type: 'response.completed', response: { id: 'r1', status: 'completed', output: [], usage: {} } }));
+  const r = await p;
+  const evs = parseSse(res.text);
+  const thinkStop = evs.findIndex(e => e.name === 'content_block_stop');
+  const sigIdx = evs.findIndex(e => e.name === 'content_block_delta' && e.json.delta.type === 'signature_delta');
+  const toolStart = evs.findIndex(e => e.name === 'content_block_start' && e.json.content_block.type === 'tool_use');
+  assert.ok(sigIdx !== -1 && sigIdx < thinkStop, 'thinking 块关闭前必须先发 signature');
+  assert.ok(thinkStop < toolStart, '思考块先关,工具块后开');
+  assert.strictEqual(evs.find(e => e.name === 'message_delta').json.delta.stop_reason, 'tool_use');
+  assert.strictEqual(r.aborted, false);
+});

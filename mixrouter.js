@@ -22,6 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
+const wireChat = require('./lib/wire-chat');
 const { upstreamAgent } = require('./lib/upstream-proxy');
 
 const VERSION = '3.5.2';
@@ -1082,11 +1083,12 @@ function classifyProxyRequest(req) {
   for (const e of ENDPOINTS) if (e.re.test(p)) return e;
   return null;
 }
-// 本渠道对这次请求该说哪种协议:Claude 组默认 Anthropic,标了 wire_api='responses'
-// 的渠道(只挂 Codex 型通道的模型,如 anyrouter 的 gpt-6-astra)由代理现场翻译;
-// Codex 组按渠道的 wire_api(都是 responses:原样转发;chat:只开 completions 的网关,由代理现场翻译)
+// 本渠道对这次请求该说哪种协议:Claude 组默认 Anthropic,标了 wire_api='responses' 或
+// 'chat' 的渠道(只挂 Codex/OpenAI 型通道的模型,如 anyrouter 的 gpt-6-astra、tokenrhythm
+// 的 glm-5.3-flash)由代理现场翻译;Codex 组按渠道的 wire_api(都是 responses:原样转发;
+// chat:只开 completions 的网关,由代理现场翻译)
 const wireOf = (provider, app) => app === 'claude'
-  ? (provider.wire_api === 'responses' ? 'responses' : 'anthropic')
+  ? (provider.wire_api === 'responses' || provider.wire_api === 'chat' ? provider.wire_api : 'anthropic')
   : (provider.wire_api === 'chat' ? 'chat' : 'responses');
 const upstreamPathOf = (wire, ep) => wire === 'anthropic' ? ep.path : (wire === 'chat' ? '/v1/chat/completions' : '/v1/responses');
 // Channel bases may already end in /v1. Keep custom prefixes, append the version once.
@@ -1267,8 +1269,9 @@ function proxyHandler(req, res) {
       const member = ordered[i];
       const provider = member.provider;
       const wire = wireOf(provider, ep.app);
-      // claude 客户端落到 responses 型渠道:本进程内翻译(lib/wire-responses.js)
-      const conv = wire === 'responses' && ep.kind === 'messages';
+      // claude 客户端落到 responses/chat 型渠道:本进程内翻译
+      // (lib/wire-responses.js 翻 Responses,lib/wire-chat.js 翻 Chat Completions)
+      const conv = (wire === 'responses' || wire === 'chat') && ep.kind === 'messages';
       const sessKey = sessionKeyOf(ident.key);
       // 本次尝试的熔断许可:请求到达终态(成功/失败/取消)时归还,半开探测名额不泄漏
       const breaker = health.acquire(provider.id);
@@ -1300,11 +1303,15 @@ function proxyHandler(req, res) {
       const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, upstreamStream);
       // [1M] 后缀与 beta 头只对 Anthropic 上游有意义;Responses 上游收的是裸名
       const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : wireResponses.stripModelSuffix(member.model || modelIn);
-      const convKey = conv ? convCacheKey(sessKey, provider.id, convCacheGen(sessKey, provider.id)) : '';
-      // 上游是 Codex 型通道时按 Codex 客户端的样子说话(claude-cli 的 UA 会被这类网关另眼看待)
-      if (conv) headers['User-Agent'] = safeHeader(provider.ua) || DEFAULT_UA_CODEX;
+      // prompt_cache_key 的渠道亲和(new-api 系)只对 responses 线有意义,chat 线没有这个概念
+      const convKey = conv && wire === 'responses' ? convCacheKey(sessKey, provider.id, convCacheGen(sessKey, provider.id)) : '';
+      // 上游是 Codex 型通道时按 Codex 客户端的样子说话(claude-cli 的 UA 会被这类网关另眼看待);
+      // chat 型网关走 buildOpenAiHeaders 的默认 UA,不需要这层伪装
+      if (conv && wire === 'responses') headers['User-Agent'] = safeHeader(provider.ua) || DEFAULT_UA_CODEX;
       const outBody = (wire === 'chat' && ep.kind === 'responses')
         ? JSON.stringify(responsesToChat({ ...body, model }, provider))
+        : (wire === 'chat' && ep.kind === 'messages')
+        ? JSON.stringify(wireChat.anthropicToChat({ ...body, model }))
         : conv
         ? JSON.stringify(wireResponses.anthropicToResponses({ ...body, model }, { promptCacheKey: convKey }))
         : wire === 'anthropic' && ep.kind === 'messages'
@@ -1360,7 +1367,8 @@ function proxyHandler(req, res) {
           cres.resume(); // 排水丢弃,避免占住 socket
           // 这次尝试作废,先拆掉它的看门狗再去打下一个渠道
           clearAttemptTimers();
-          if (conv && convRetries < CONV_RETRIES) { convRetries++; rotateConvCacheGen(sessKey, provider.id); releaseBreaker('failure', `http ${cres.statusCode}`, cres.statusCode); return tryCandidate(i); }
+          // 换 cache 代际只对 responses 线有意义(new-api 的渠道亲和);chat 线原样重打一次
+          if (conv && convRetries < CONV_RETRIES) { convRetries++; if (wire === 'responses') rotateConvCacheGen(sessKey, provider.id); releaseBreaker('failure', `http ${cres.statusCode}`, cres.statusCode); return tryCandidate(i); }
           return nextOrFail(cres.statusCode, `HTTP ${cres.statusCode}`);
         }
         done = true;
@@ -1503,6 +1511,108 @@ function proxyHandler(req, res) {
               }
             });
           }
+          return;
+        }
+        // claude 客户端 + chat 上游 = 现场翻译(响应/SSE 翻回 Anthropic,错误也翻成 Anthropic 形状)
+        if (wire === 'chat' && ep.kind === 'messages') {
+          if (cres.statusCode >= 400) {
+            const parts = [];
+            cres.on('data', c => parts.push(c));
+            cres.on('end', () => {
+              const text = Buffer.concat(parts).toString('utf8');
+              finishEntry();
+              if (res.headersSent) { try { res.end(); } catch {} return; }
+              let msg = text;
+              try {
+                const j = JSON.parse(text);
+                const e = j.error;
+                msg = (e && (e.message || (typeof e === 'string' ? e : JSON.stringify(e)))) || j.message || text;
+              } catch {}
+              res.writeHead(cres.statusCode, { ...outHeaders, 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(msg).slice(0, 400) } }));
+            });
+            return;
+          }
+          if (isSse) {
+            // 客户端要非流:上游照发流式,收进内存攒成整包 JSON 再回(见 upstreamStream 注释)。
+            // 心跳注释绝不能开:攒包期间真 res 还没写头,塞进一个字节就把非流响应毁了
+            const sink = body.stream ? null : wireResponses.memorySink();
+            wireChat.relayChatStream(cres, sink ? sink.res : res, model, {
+              mayRetry: !res.headersSent && convRetries < CONV_RETRIES, headers: outHeaders,
+              onCommit: body.stream ? startKeepAlive : null, // 真提交给客户端了,从这一刻起补心跳
+            }).then(r => {
+              // 客户端已经走了就别再重打一遍:那是在为没人接收的请求烧渠道额度
+              if (r && r.retryable && !clientClosed && !res.destroyed && !deadlineHit) {
+                convRetrying = true; convRetries++; entry.attempts = i + 1;
+                clearAttemptTimers(); // 这一发上游已经交给别人的 res,别让它 240s 后再来改这条日志
+                return tryCandidate(i);
+              }
+              // 终态已定,响应体和空闲看门狗都不该再判这一笔(否则夭折会被二次记成连接中断)
+              responseDone = true; disarmIdle();
+              // 客户端自己断的不算渠道的账(那是取消);上游真夭折才记这一笔
+              if (r && r.aborted && !clientClosed) {
+                entry.err = entry.err || r.detail || '上游流中断';
+                entry.err_class = entry.err_class || 'stream_aborted';
+              }
+              const u = (r && r.usage) || {};
+              let msg = null, parseError = null;
+              if (sink && r && !r.aborted) {
+                try { msg = wireResponses.collectAnthropicMessage(sink.text()); }
+                catch (e) { parseError = e; }
+              }
+              if (sink && (parseError || (r && r.aborted))) {
+                entry.status = 502;
+                entry.err = entry.err || (parseError && parseError.message) || (r && r.detail) || '上游流中断';
+                entry.err_class = entry.err_class || 'stream_aborted';
+              }
+              finishEntry({
+                in: u.input_tokens || 0, out: u.output_tokens || 0,
+                cache_read: u.cache_read_input_tokens || 0,
+              });
+              // 非流客户端:攒下的流只有在完整终态可重建时才回 200;断流、错误事件或损坏的
+              // 工具参数统一回 502,不能把残缺 SSE 伪装成成功 JSON。
+              if (sink && !res.headersSent && !clientClosed) {
+                if (msg) {
+                  res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
+                  try { return res.end(JSON.stringify(msg)); } catch { return; }
+                }
+                try {
+                  res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: entry.err || '上游流中断' } }));
+                } catch {}
+              }
+            });
+            return;
+          }
+          const parts = [];
+          cres.on('data', c => parts.push(c));
+          cres.on('end', () => {
+            const text = Buffer.concat(parts).toString('utf8');
+            let msg = null, rerr = null;
+            try {
+              const j = JSON.parse(text);
+              // HTTP 200 里包着 error / 工具参数残缺:回 Anthropic error,
+              // 不能翻成一条 content 为空的"正常消息"
+              rerr = wireChat.chatErrorOf(j);
+              if (!rerr) msg = wireChat.chatToAnthropic(j, model);
+            } catch { /* 非 JSON 原样透传 */ }
+            if (rerr) {
+              entry.status = 502; // 记客户端真正拿到的状态:200 里包着的失败不是成功
+              entry.err = rerr.message; entry.err_class = entry.err_class || 'upstream_server';
+              finishEntry();
+              if (res.headersSent) { try { res.end(); } catch {} return; }
+              res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify({ type: 'error', error: rerr }));
+            }
+            const u = (msg && msg.usage) || {};
+            finishEntry({ in: u.input_tokens || 0, out: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0 });
+            if (res.headersSent) return;
+            try {
+              // 客户端要流、上游却整包回 JSON:摊成 Anthropic SSE,别让 Claude Code 干等
+              if (msg && body.stream) wireResponses.emitAnthropicSse(res, msg, outHeaders, startKeepAlive);
+              else { res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' }); res.end(msg ? JSON.stringify(msg) : text); }
+            } catch {}
+          });
           return;
         }
         // claude 客户端 + responses 上游 = 现场翻译(响应/SSE 翻回 Anthropic,错误也翻成 Anthropic 形状)
@@ -1740,10 +1850,10 @@ function backupFile(file) {
 }
 
 function switchClaude(p) {
-  // 标了 wire_api:'responses' 的渠道只挂 Codex 型通道,上游根本没有 /v1/messages:
+  // 标了 wire_api:'responses'/'chat' 的渠道只挂 Codex/OpenAI 型通道,上游根本没有 /v1/messages:
   // 直连写进去等于把客户端写坏(而且界面上还显示切换成功)。拒绝,让它走路由模式。
-  if (wireOf(p, 'claude') === 'responses')
-    throw Object.assign(new Error('该渠道标了 wire_api: responses(模型只挂在 Codex 型通道上),直连后 Claude Code 的 /v1/messages 必然失败;请改用控制台的「路由模式」经本机代理转发'), { statusCode: 400 });
+  if (wireOf(p, 'claude') !== 'anthropic')
+    throw Object.assign(new Error(`该渠道标了 wire_api: ${wireOf(p, 'claude')}(模型只挂在 Codex/OpenAI 型通道上),直连后 Claude Code 的 /v1/messages 必然失败;请改用控制台的「路由模式」经本机代理转发`), { statusCode: 400 });
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf8')); } catch {}
   backupFile(CLAUDE_SETTINGS);
@@ -1978,7 +2088,8 @@ function testProviderUpstream(p, u) {
       const transport = u.protocol === 'https:' ? https : http;
       const creq = transport.request({
         protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
-        path: u.pathname.replace(/\/+$/, '') + '/models', method: 'GET', timeout: TEST_TIMEOUT_MS,
+        // 探活路径与真实转发同规则:base_url 裸域名也要落到 /v1/models(拼成 <裸域名>/models 会 404/503)
+        path: joinUpstreamPath(u.pathname, '/v1/models'), method: 'GET', timeout: TEST_TIMEOUT_MS,
         agent: upstreamAgent(u.protocol),
         headers: { 'Authorization': 'Bearer ' + p.api_key, 'User-Agent': DEFAULT_UA },
       }, cres => {
@@ -2132,8 +2243,8 @@ function apiHandler(req, res) {
       if (b.app !== undefined && !['claude', 'codex'].includes(b.app)) return send(400, { error: '渠道 app 必须是 claude 或 codex' });
       const app = b.app || 'claude';
       if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
-      if (b.wire_api !== undefined && !(app === 'claude' ? ['anthropic', 'responses'] : ['responses', 'chat']).includes(b.wire_api))
-        return send(400, { error: app === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic 或 responses' : 'wire_api 必须是 responses 或 chat' });
+      if (b.wire_api !== undefined && !(app === 'claude' ? ['anthropic', 'responses', 'chat'] : ['responses', 'chat']).includes(b.wire_api))
+        return send(400, { error: app === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic、responses 或 chat' : 'wire_api 必须是 responses 或 chat' });
       if (!b.name || !b.base_url) return send(400, { error: 'name 与 base_url 必填' });
       if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
       if (app === 'codex' && !b.model) return send(400, { error: 'Codex 渠道必须填模型名' });
@@ -2145,8 +2256,8 @@ function apiHandler(req, res) {
         prov.models = Array.isArray(b.models) ? b.models : String(b.models || '').split(',').map(s => s.trim()).filter(Boolean);
         prov.slots = normalizeChannelSlots(b.slots);
         prov.ua = String(b.ua || '');
-        // responses:该渠道的模型只挂在 Codex(Responses)型通道上,由本进程翻译
-        if (b.wire_api === 'responses') prov.wire_api = 'responses';
+        // responses/chat:该渠道的模型只挂在 Codex(Responses)/OpenAI(Chat)型通道上,由本进程翻译
+        if (b.wire_api === 'responses' || b.wire_api === 'chat') prov.wire_api = b.wire_api;
       } else {
         prov.model = String(b.model || '');
         prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
@@ -2172,8 +2283,8 @@ function apiHandler(req, res) {
         const b = await readObject();
         if (b.app !== undefined && b.app !== providerApp(prov.id)) return send(400, { error: '不能改变渠道所属协议组 app' });
         if (b.enabled !== undefined && typeof b.enabled !== 'boolean') return send(400, { error: 'enabled 必须是布尔值' });
-        if (b.wire_api !== undefined && !(providerApp(prov.id) === 'claude' ? ['anthropic', 'responses'] : ['responses', 'chat']).includes(b.wire_api))
-          return send(400, { error: providerApp(prov.id) === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic 或 responses' : 'wire_api 必须是 responses 或 chat' });
+        if (b.wire_api !== undefined && !(providerApp(prov.id) === 'claude' ? ['anthropic', 'responses', 'chat'] : ['responses', 'chat']).includes(b.wire_api))
+          return send(400, { error: providerApp(prov.id) === 'claude' ? 'claude 渠道的 wire_api 必须是 anthropic、responses 或 chat' : 'wire_api 必须是 responses 或 chat' });
         if (b.name !== undefined) prov.name = String(b.name);
         if (b.base_url !== undefined) {
           if (!validBaseUrl(b.base_url)) return send(400, { error: 'base_url 必须是合法的 http(s) URL,如 https://api.example.com' });
@@ -2186,7 +2297,7 @@ function apiHandler(req, res) {
           if (b.models !== undefined) prov.models = Array.isArray(b.models) ? b.models : String(b.models).split(',').map(s => s.trim()).filter(Boolean);
           if (b.slots !== undefined) prov.slots = normalizeChannelSlots(b.slots);
           if (b.ua !== undefined) prov.ua = String(b.ua);
-          if (b.wire_api !== undefined) { if (b.wire_api === 'responses') prov.wire_api = 'responses'; else delete prov.wire_api; }
+          if (b.wire_api !== undefined) { if (b.wire_api === 'responses' || b.wire_api === 'chat') prov.wire_api = b.wire_api; else delete prov.wire_api; }
         } else {
           if (b.model !== undefined) prov.model = String(b.model);
           if (b.wire_api !== undefined) prov.wire_api = b.wire_api === 'chat' ? 'chat' : 'responses';
@@ -2413,6 +2524,8 @@ module.exports = {
   ENDPOINTS, classifyProxyRequest, wireOf, upstreamPathOf, modelList, buildOpenAiHeaders,
   codexHeaderSessionId, codexBodySessionId, codexFirstUserText, codexUserTexts, extractUsageOpenAI, extractUsageFor,
   responsesToChat, chatJsonToResponses, streamChatAsResponses, chatToolChoice, itemToChatMessages,
+  // claude 组 chat 上游翻译(lib/wire-chat.js)
+  wireChat,
   // v3.2 子代理槽位
   slotAlias, resolveSlot, slotsPublic, validateSlotPut, CLAUDE_SLOTS, CLAUDE_SLOT_ENV,
   normalizeChannelSlots, CLAUDE_SLOT_KEYS, claudeSplitPatch, configureClaudeSplit, altPorts,

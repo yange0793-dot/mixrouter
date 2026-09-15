@@ -342,8 +342,8 @@
           <div id="m-models-list"></div>
           <button type="button" class="small" onclick="addModelDraft()">＋ 添加模型</button>
           <p class="muted">下拉里是本组渠道登记过的模型名；要写没登记的就选「自定义模型…」。这里填的模型会出现在「路由」页槽位表的落点模型下拉里。</p>
-          <label for="m-wire-claude">上游协议（wire_api）</label><select id="m-wire-claude"><option value="anthropic">Anthropic Messages（默认：直连 Claude 系网关）</option><option value="responses">Responses（模型只在 Codex 型通道上，由 mixrouter 现场转换）</option></select>
-          <p class="muted">选 Responses 后请求在本进程内翻成 Responses 发出、响应翻回 Anthropic，不用再挂本地转换代理。</p>
+          <label for="m-wire-claude">上游协议（wire_api）</label><select id="m-wire-claude"><option value="anthropic">Anthropic Messages（默认：直连 Claude 系网关）</option><option value="responses">Responses（模型只在 Codex 型通道上，由 mixrouter 现场转换）</option><option value="chat">Chat Completions（模型只在 OpenAI 型通道上，如 glm/qwen 系，由 mixrouter 现场转换）</option></select>
+          <p class="muted">选 Responses / Chat 后请求在本进程内翻译后发出、响应翻回 Anthropic，不用再挂本地转换代理。</p>
         </div>
         <div id="m-codex-fields" style="display:none">
           <label for="m-model">模型 <span aria-hidden="true">*</span></label><input type="text" id="m-model" placeholder="如 gpt-5.6-sol" spellcheck="false">
@@ -558,9 +558,9 @@ function renderProviders() {
     const t = testResults[p.id];
     const tline = !t ? '' : t.wait ? '<div class="testline wait" role="status">测试中…</div>' : `<div class="testline ${t.ok ? 'ok' : 'err'}" role="status">上次测试${t.ok ? '通过' : '失败'} · ${esc(t.ok ? `${t.status} · ${t.ms}ms${t.model ? ' · ' + t.model : ''}` : t.error || ('HTTP ' + t.status))}${!t.ok && t.body ? ' · ' + esc(t.body.slice(0, 120)) : ''}</div>`;
     const models = group === 'claude' ? (p.models || []) : [p.model].filter(Boolean);
-    const wire = group === 'claude' ? (p.wire_api === 'responses' ? 'responses（转换）' : 'anthropic') : p.wire_api || 'responses';
-    // responses 渠道只挂 Codex 型通道,直连写进客户端必然失败(服务端也会拒),按钮直接封掉
-    const convOnly = group === 'claude' && p.wire_api === 'responses';
+    const wire = group === 'claude' ? (p.wire_api === 'responses' ? 'responses（转换）' : p.wire_api === 'chat' ? 'chat（转换）' : 'anthropic') : p.wire_api || 'responses';
+    // responses/chat 渠道只挂 Codex/OpenAI 型通道,直连写进客户端必然失败(服务端也会拒),按钮直接封掉
+    const convOnly = group === 'claude' && (p.wire_api === 'responses' || p.wire_api === 'chat');
     const arg = handlerArg(p.id), locked = !online || (isZcode && !zcodeSupported()) || convOnly;
     return `<article class="card ${p.enabled ? '' : 'off'} ${verified ? 'cur' : ''}">
       <div class="top"><span class="cdot" aria-hidden="true"></span><h3 class="name">${esc(p.name)}</h3>${isCur ? `<span class="badge ${verified ? 'on' : 'off'}">${verified ? '已写入配置' : '库内选中'}</span>` : ''}${drift && online ? '<span class="badge drift">配置不一致</span>' : ''}<span class="badge ${p.enabled ? 'info' : 'off'}">${p.enabled ? '启用' : '停用'}</span></div>
@@ -605,7 +605,7 @@ function openProvider(id) {
   modelCandidates = [...new Set(providers(editingGroup).flatMap(p => p.models || []))].sort();
   modelDraft = (editing?.models || []).map(m => ({ value: m, editing: false }));
   renderModelDraft();
-  $('m-wire-claude').value = editing?.wire_api === 'responses' ? 'responses' : 'anthropic';
+  $('m-wire-claude').value = editing?.wire_api === 'responses' ? 'responses' : editing?.wire_api === 'chat' ? 'chat' : 'anthropic';
   $('m-note').value = editing?.note || ''; $('m-enabled').checked = editing ? !!editing.enabled : true;
   showDialog('mask', 'm-name');
 }
