@@ -749,7 +749,7 @@ function codexSlotRow(s) {
     ${s.provider ? `<button class="iconbtn" aria-label="删除 ${esc(s.name)} 槽" onclick="clearSlot('codex','${s.name}')">×</button>` : ''}
   </div>`;
 }
-function renderSlots() {
+function renderSlots(force) {
   const panel = $('slots-panel');
   if (!state || curApp === 'zcode') { panel.hidden = true; return; }
   panel.hidden = false;
@@ -768,12 +768,22 @@ function renderSlots() {
         <label class="field" style="flex:2">渠道<select id="slot-new-provider">${slotChannelOptions('', 'codex')}</select></label>
         <button class="small" style="align-self:center" onclick="addCodexSlot()" ${online ? '' : 'disabled'}>＋ 添加槽位</button>
       </div>`;
-  // 轮询不重绘正在操作的槽位表:内容没变跳过;焦点在表内时不打扰
-  if ($('slots-rows').innerHTML !== rows && !($('slots-rows').contains(document.activeElement) || activeDialog)) $('slots-rows').innerHTML = rows;
+  // 轮询不重绘正在操作的槽位表:内容没变跳过;焦点在表内时不打扰。force=用户刚提交槽位改动,
+  // 此时焦点多半还停在刚操作的 select 上,必须重绘否则落点模型下拉一直停留在旧渠道的选项,并把焦点放回原控件
+  if ($('slots-rows').innerHTML !== rows && (force || !($('slots-rows').contains(document.activeElement) || activeDialog))) {
+    const af = document.activeElement;
+    const mark = $('slots-rows').contains(af) ? (af.id ? '#' + af.id : '[aria-label="' + (af.getAttribute('aria-label') || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]') : '';
+    $('slots-rows').innerHTML = rows;
+    if (mark) { const el = $('slots-rows').querySelector(mark); if (el) el.focus(); }
+  }
 }
 async function putSlot(app, name, value) {
   if (!online) { toast('控制台离线，未保存槽位改动', 'err'); return false; }
-  try { await api('/api/slots', { method: 'PUT', body: JSON.stringify({ [app]: { [name]: value } }) }); await refresh(); return true; }
+  try {
+    const r = await api('/api/slots', { method: 'PUT', body: JSON.stringify({ [app]: { [name]: value } }) });
+    if (r?.slots) { state.slots = r.slots; renderSlots(true); }
+    await refresh(); return true;
+  }
   catch (e) { toast('槽位保存失败：' + e.message, 'err'); return false; }
 }
 async function setSlot(app, name, field, value) {

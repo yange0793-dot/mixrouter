@@ -32,6 +32,15 @@ function fixture() {
     },
     router: { id: '@router', url: 'http://127.0.0.1:8787', claude_base: 'http://127.0.0.1:8787', codex_base: 'http://127.0.0.1:8787/v1', zcode_base: 'http://127.0.0.1:8787/custom' },
     routes: { rules: [{ id: 'r1', match: 'claude', provider: 'a1', model: '', enabled: true, pool: [], when: {} }], default: { provider: 'a1', model: '', pool: [] } },
+    slots: {
+      claude: ['main', 'opus', 'sonnet', 'fable', 'haiku', 'subagent'].map(name => ({
+        name, alias: 'mixr-' + name,
+        env: { main: 'ANTHROPIC_MODEL', subagent: 'CLAUDE_CODE_SUBAGENT_MODEL' }[name] || 'ANTHROPIC_DEFAULT_' + name.toUpperCase() + '_MODEL',
+        provider: name === 'main' ? 'a1' : '', provider_name: name === 'main' ? 'Alpha' : '', enabled: true,
+        model: name === 'main' ? 'claude-special' : '',
+      })),
+      codex: [],
+    },
     sessions: [], cooldowns: [],
   };
 }
@@ -98,6 +107,7 @@ async function harness(data = fixture()) {
   }
   get('provider-filter').value = 'all'; get('logs-auto').checked = true;
   const requests = [];
+  const slots = structuredClone(data.slots || { claude: [], codex: [] });
   let failState = false;
   const context = vm.createContext({
     document, window: { addEventListener() {} }, console, URL, URLSearchParams, AbortController, structuredClone,
@@ -110,6 +120,19 @@ async function harness(data = fixture()) {
         return { ok: true, json: async () => structuredClone(data) };
       }
       if (url === '/api/stats') return { ok: true, json: async () => ({ reqs: 12, ok_rate: 100, inTok: 100, outTok: 40, cache: 0 }) };
+      if (url === '/api/slots' && options.method === 'PUT') {
+        // 模拟真实服务端:合并槽位改动后返回最新槽位表(slotsPublic)
+        for (const app of ['claude', 'codex']) {
+          const patch = body?.[app];
+          if (!patch || typeof patch !== 'object') continue;
+          for (const [name, val] of Object.entries(patch)) {
+            if (val === null) { const i = slots[app].findIndex(s => s.name === name); if (i >= 0) slots[app].splice(i, 1); continue; }
+            const entry = slots[app].find(s => s.name === name);
+            if (entry) Object.assign(entry, val);
+          }
+        }
+        return { ok: true, json: async () => ({ ok: true, slots: structuredClone(slots) }) };
+      }
       if (url.startsWith('/api/logs')) return { ok: true, json: async () => ({ logs: [] }) };
       return { ok: true, json: async () => ({ ok: true, id: 'created-id' }) };
     },
@@ -326,4 +349,20 @@ test('generated handlers compile safely for quotes, apostrophes, and HTML in pro
   }
   assert.equal(h.get('prov-grid').innerHTML.includes('<script>bad()'), false);
   assert.equal(h.get('prov-grid').innerHTML.includes('&lt;script&gt;bad()'), true);
+});
+
+test('槽位换渠道后落点模型下拉当场换成新渠道的模型(焦点仍在表内也重绘)', async () => {
+  const h = await harness();
+  h.run("setApp('claude')");
+  const before = h.get('slots-rows').innerHTML;
+  assert.match(before, /claude-special/);
+  assert.doesNotMatch(before, /claude-old/);
+  // 用户刚在渠道 select 里选完新渠道,焦点还停在槽位表内:轮询守卫本会跳过重绘,用户提交的改动必须绕过它
+  h.run("globalThis.__sel = new document.body.constructor('f', 'select'); __sel.setAttribute('aria-label', 'main 槽渠道'); __sel.parentElement = document.getElementById('slots-rows'); __sel.focus();");
+  assert.equal(h.document.activeElement.getAttribute('aria-label'), 'main 槽渠道');
+  await h.run("setSlot('claude', 'main', 'provider', 'a2')");
+  const after = h.get('slots-rows').innerHTML;
+  assert.match(after, /value="a2"/);
+  assert.match(after, /claude-old/);
+  assert.doesNotMatch(after, /claude-special/);
 });
