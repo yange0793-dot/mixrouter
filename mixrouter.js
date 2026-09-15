@@ -24,6 +24,7 @@ const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
 const wireChat = require('./lib/wire-chat');
 const { upstreamAgent } = require('./lib/upstream-proxy');
+const imageRelay = require('./lib/image-relay');
 
 const VERSION = '3.5.2';
 const ROOT = __dirname;
@@ -38,6 +39,8 @@ const LOG_FILE = path.join(DATA_DIR, 'logs', 'requests.jsonl');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 // 请求体上限可用环境变量调小(测试用),默认 64MB
 const BODY_LIMIT = Number(process.env.MIXR_BODY_LIMIT_MB || 64) * 1024 * 1024;
+// 识图中继开关(图片块落盘+换指路文本,MIXR_IMAGE_RELAY=off 关闭;只作用于 claude 入口)
+const IMAGE_RELAY_ON = process.env.MIXR_IMAGE_RELAY !== 'off';
 function envInt(name, fallback, min = 1, max = 2147483647) {
   const raw = process.env[name];
   const value = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
@@ -1189,6 +1192,13 @@ function proxyHandler(req, res) {
     const ordered = [target.member]
       .concat(members.filter(m => m.provider.id !== target.member.provider.id))
       .slice(0, Math.max(1, MAX_ATTEMPTS));
+
+    // 识图中继:anthropic 直通上游收到 image 块直接 500,chat 桥不认图,模型没机会跑
+    // grok-vision → 用户贴图=整轮报废。落盘换指路文本;responses 线原生转 input_image,不动。
+    if (IMAGE_RELAY_ON && ep.app === 'claude' && wireOf(ordered[0].provider, ep.app) !== 'responses') {
+      const relayed = imageRelay.rewrite(body);
+      if (relayed) console.log(`[vision-relay] 替换 ${relayed} 张图片 → ${imageRelay.INBOX} (session ${sessionKeyOf(ident.key)})`);
+    }
 
     const started = Date.now();
     const rawLen = chunks.reduce((n, c) => n + c.length, 0);
