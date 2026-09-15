@@ -351,11 +351,11 @@ test('generated handlers compile safely for quotes, apostrophes, and HTML in pro
   assert.equal(h.get('prov-grid').innerHTML.includes('&lt;script&gt;bad()'), true);
 });
 
-test('槽位换渠道后落点模型下拉当场换成新渠道的模型(焦点仍在表内也重绘)', async () => {
+test('槽位落点模型可自由填写:换渠道后建议当场换新渠道的模型,未登记的模型名也照存', async () => {
   const h = await harness();
   h.run("setApp('claude')");
   const before = h.get('slots-rows').innerHTML;
-  assert.match(before, /claude-special/);
+  assert.match(before, /claude-special/);                 // 渠道模型列表只作建议(datalist)
   assert.doesNotMatch(before, /claude-old/);
   // 用户刚在渠道 select 里选完新渠道,焦点还停在槽位表内:轮询守卫本会跳过重绘,用户提交的改动必须绕过它
   h.run("globalThis.__sel = new document.body.constructor('f', 'select'); __sel.setAttribute('aria-label', 'main 槽渠道'); __sel.parentElement = document.getElementById('slots-rows'); __sel.focus();");
@@ -365,4 +365,21 @@ test('槽位换渠道后落点模型下拉当场换成新渠道的模型(焦点�
   assert.match(after, /value="a2"/);
   assert.match(after, /claude-old/);
   assert.doesNotMatch(after, /claude-special/);
+  // 落点模型是输入框而非下拉:渠道清单里没有的模型名也能直接写进去并提交
+  // (夹具的 /api/state 是静态的,refresh 会把槽位表还原成初始值,所以这里只断言提交内容)
+  await h.run("setSlot('claude', 'main', 'model', 'brand-new-model')");
+  const put = h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/slots');
+  assert.equal(put.body.claude.main.model, 'brand-new-model');
+  assert.equal(typeof put.body.claude.main.provider, 'string');
+});
+
+test('渠道弹窗不再带模型映射:保存只提交模型列表,不再写渠道级槽位', async () => {
+  const h = await harness();
+  assert.doesNotMatch(html, /id="m-slot-/);              // 弹窗里那条「模型映射」整体去掉
+  h.run("setApp('claude'); openProvider('a1')");
+  h.get('m-models').value = 'brand-new-model, claude-special';
+  await h.run('saveProvider()');
+  const put = h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/providers/a1');
+  assert.equal(put.body.models, 'brand-new-model, claude-special', '模型列表照旧按自由文本提交');
+  assert.equal(put.body.slots, undefined, '渠道级槽位不再由弹窗改写');
 });

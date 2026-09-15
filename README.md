@@ -60,10 +60,14 @@ npm start                     # 或 ./mixctl start(后台常驻 + .run/mixrouter
 
   响应头带 `x-mixrouter-app` / `x-mixrouter-provider` / `x-mixrouter-model` / `x-mixrouter-session` 便于排查。
 - **控制台 8788**：顶部可选 Claude Code / Codex / ZCode；渠道支持搜索、筛选、测试、编辑、删除及客户端接入。
+  渠道弹窗里的「模型列表」是自由文本(逗号分隔,第一项作主模型,支持 `[1M]` 后缀)——模型名直接写,
+  不许先去别处登记;它同时是「路由」页槽位表里落点模型输入框的建议项(datalist),而落点模型本身
+  也可以直接输入任意模型名。
   配置状态与库内记录不一致时显示漂移告警；另有路由编辑、会话列表与实时请求日志。
 - **切换(Claude Code)**:只改 `~/.claude/settings.json` 的 env 里 `ANTHROPIC_BASE_URL /
   AUTH_TOKEN / MODEL`(+ 可选槽位 `ANTHROPIC_DEFAULT_OPUS/SONNET/FABLE/HAIKU_MODEL` 与
-  `CLAUDE_CODE_SUBAGENT_MODEL`,渠道模型映射里没填就不动),其余键原样保留。
+  `CLAUDE_CODE_SUBAGENT_MODEL`——用的是渠道库里遗留的映射(早期导入的渠道可能带),
+  控制台**不再**编辑渠道级模型映射:槽位改在「路由」页的槽位表里管),其余键原样保留。
   没填映射、而客户端当前还是 `mixr-*` 槽位别名的槽会一并清掉——否则直连之后客户端会把
   `mixr-haiku` 当模型名发给真实上游;手设的真实模型名一律不碰。
   标了 `wire_api: responses` 的渠道**会被拒绝切换**(它只挂 Codex 型通道,直连后
