@@ -393,13 +393,31 @@ test('槽位落点模型是下拉:渠道模型列全可选,换渠道当场换清
   assert.equal(h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/slots').body.claude.main.model, 'second-new-model');
 });
 
-test('渠道弹窗不再带模型映射:保存只提交模型列表,不再写渠道级槽位', async () => {
+test('渠道弹窗:模型列表按行编辑,下拉是本组登记过的模型名,没登记的可手写;不写渠道级槽位', async () => {
   const h = await harness();
   assert.doesNotMatch(html, /id="m-slot-/);              // 弹窗里那条「模型映射」整体去掉
+  assert.doesNotMatch(html, /id="m-models"/);            // 单行逗号文本框也换成行式清单了
   h.run("setApp('claude'); openProvider('a1')");
-  h.get('m-models').value = 'brand-new-model, claude-special';
+  const rows = () => h.get('m-models-list').innerHTML;
+  assert.match(rows(), /<select aria-label="模型1" onchange="pickModelDraft\(0,this\.value\)">/);
+  assert.match(rows(), /<option value="claude-special" selected>claude-special<\/option>/);  // 这条渠道自己的模型
+  assert.match(rows(), /<option value="claude-old" >claude-old<\/option>/);                  // 本组别的渠道登记过的模型
+  assert.match(rows(), /<option value="__custom__">自定义模型…<\/option>/);
+  assert.match(rows(), /<datalist id="model-candidates">/);
+  // 新行默认「（选模型）」,不自作主张填第一个
+  h.run('addModelDraft()');
+  assert.match(rows(), /<select aria-label="模型2" onchange="pickModelDraft\(1,this\.value\)"><option value="" selected>（选模型）<\/option>/);
+  // 没登记过的模型名:选「自定义模型…」把这一行切成输入框再写
+  h.run("pickModelDraft(1,'__custom__')");
+  assert.match(rows(), /<input type="text" aria-label="模型2" value=""/);
+  h.run("endModelEdit(1, ' brand-new-model ')");
+  assert.equal(h.run('modelDraft[1].value'), 'brand-new-model', '手写的名字去掉两端空格存进草稿');
+  assert.equal(h.run("modelCandidates.includes('brand-new-model')"), true, '手写过的名字并进下拉候选');
+  h.run("addModelDraft(); pickModelDraft(2,'claude-special')");                              // 重复项
   await h.run('saveProvider()');
   const put = h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/providers/a1');
-  assert.equal(put.body.models, 'brand-new-model, claude-special', '模型列表照旧按自由文本提交');
+  assert.deepEqual(put.body.models, ['claude-special', 'brand-new-model'], '按行序提交、去重、丢掉空行');
   assert.equal(put.body.slots, undefined, '渠道级槽位不再由弹窗改写');
+  h.run("removeModelDraft(1)");
+  assert.doesNotMatch(rows(), /brand-new-model/);
 });
