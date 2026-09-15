@@ -223,6 +223,24 @@ test('上游拒绝连接时返回 502', async () => {
   assert.strictEqual(JSON.parse(r.text).error.type, 'api_error');
 });
 
+test('上游 4xx 挂 SSE 皮(New API 系网关):如实转发状态码与上游原因,不报“流缺完整终态”', async () => {
+  mock.setSseWrappedError(402, 'Budget pool quota has been exhausted.');
+  const before = mock.requests.length;
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    headers: { 'anthropic-version': '2023-06-01' },
+    body: { model: 'claude-opus-5', max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert.strictEqual(r.status, 402, '上游状态码要如实转发,不能糊成 502');
+  const j = JSON.parse(r.text);
+  assert.strictEqual(j.type, 'error');
+  assert.match(j.error.message, /402/);
+  assert.match(j.error.message, /Budget pool quota/, '上游原因要带出来,用户才知道是额池没了');
+  assert.strictEqual(mock.requests.length, before + 1, '402 不是可重试错误,不该重打上游');
+  const logs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs')).text);
+  assert.strictEqual(logs.logs[0].status, 402);
+  assert.notStrictEqual(logs.logs[0].err_class, 'stream_aborted', '这不是断流,别记成断流');
+});
+
 test('控制台 API:渠道 CRUD 全流程,key 不出网', async () => {
   // 创建 codex 渠道
   const created = await rawRequest(uiPort, 'POST', '/api/providers', {

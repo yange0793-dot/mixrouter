@@ -9,6 +9,7 @@ const http = require('http');
 
 function createMockUpstream() {
   const requests = [];
+  let sseWrapped = null;                 // { status, message, times }:HTTP 4xx 却挂着 text/event-stream 皮
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url.includes('/models')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -22,6 +23,13 @@ function createMockUpstream() {
       try { body = JSON.parse(Buffer.concat(cs).toString('utf8') || '{}'); } catch {}
       requests.push({ url: req.url, headers: req.headers, body });
       const model = body.model || '(none)';
+      // New API 系网关对 stream=true 的请求就这么回错:状态码是真错、content-type 却是 SSE、
+      // body 是一坨 JSON。上游这么干时,不能当消息流去解析
+      if (sseWrapped && sseWrapped.times > 0) {
+        sseWrapped.times--;
+        res.writeHead(sseWrapped.status, { 'Content-Type': 'text/event-stream' });
+        return res.end(JSON.stringify({ error: { message: sseWrapped.message, type: 'bad_response_status_code' }, type: 'error' }));
+      }
       if (req.url.includes('count_tokens')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ input_tokens: 42 }));
@@ -47,7 +55,7 @@ function createMockUpstream() {
         stop_reason: 'end_turn', usage: { input_tokens: 17, output_tokens: 9, cache_read_input_tokens: 5 } }));
     });
   });
-  return { server, requests };
+  return { server, requests, setSseWrappedError: (status, message, times = 1) => { sseWrapped = { status, message, times }; } };
 }
 
 // /v1/responses —— codex 的母语,原样回一个最小可用的 responses 流

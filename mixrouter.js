@@ -1610,6 +1610,29 @@ function proxyHandler(req, res) {
         // 同协议直通:Anthropic→Anthropic / responses→responses / chat→chat
         // anthropic 线上游恒流式(见 upstreamStream 注释):客户端要非流时收进内存攒成整包
         // JSON 再回,而不是把非流形状透传给上游吃那 120s 首字节死循环
+        // Anthropic 线上游拿 SSE 皮回 4xx/5xx:New API 系网关对 stream=true 的请求就是这么回的
+        // (实测 agentrouter.org 额池耗尽:HTTP 402 + content-type text/event-stream,body 却是一坨 JSON)。
+        // 照消息流去解析只会得出「缺完整终态」,把真实状态码和上游原因一起吞掉,用户看到的是"接口断了"
+        // 而不是"额池没了"。这里照 responses 转换分支的做法,直翻成 Anthropic 错误原样说明。
+        if (wire === 'anthropic' && cres.statusCode >= 400) {
+          const parts = [];
+          cres.on('data', c => parts.push(c));
+          cres.on('end', () => {
+            const text = Buffer.concat(parts).toString('utf8');
+            finishEntry();
+            if (res.headersSent) { try { res.end(); } catch {} return; }
+            let detail = text;
+            try {
+              const j = JSON.parse(text);
+              const e = j.error;
+              detail = (e && (e.message || (typeof e === 'string' ? e : JSON.stringify(e)))) || j.message || text;
+            } catch {}
+            sendErr(cres.statusCode, 'api_error',
+              `上游 ${provider.name} 返回 ${cres.statusCode}: ${String(detail).slice(0, 400).trim() || '(空响应体)'}`,
+              entry.err_class);
+          });
+          return;
+        }
         if (wire === 'anthropic' && !body.stream && isSse) {
           const sink = wireResponses.memorySink();
           cres.on('data', c => sink.res.write(c));
