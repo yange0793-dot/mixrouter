@@ -705,6 +705,36 @@ async function testProvider(id) {
 // 槽位 = 别名(mixr-…)→「渠道 @ 模型」。Claude 四个固定槽写进客户端 env;
 // Codex 槽名自拟,客户端用 codex -m mixr-<槽名> 选用。别名请求优先于一切路由规则。
 const SLOT_LABELS = { main: '主模型 main', opus: 'Opus 槽', sonnet: 'Sonnet 槽', fable: 'Fable 槽', haiku: 'Haiku 槽', subagent: 'Subagent 槽' };
+const SLOT_MODEL_CUSTOM = '__custom__';
+const slotModelEdit = { claude: null };        // {name, value} 正在手写模型名的槽位（下拉切输入框）
+function onSlotModelPick(app, name, value) {
+  if (value === SLOT_MODEL_CUSTOM) {
+    const s = (slotsOf()[app] || []).find(x => x.name === name);
+    slotModelEdit[app] = { name, value: (s && s.model) || '' };   // 记下原值,失焦时才知道有没有真改
+    return renderSlots(true);
+  }
+  slotModelEdit[app] = null;
+  return setSlot(app, name, 'model', value);
+}
+async function commitSlotModel(app, name, value) {
+  slotModelEdit[app] = null;
+  const ok = await setSlot(app, name, 'model', (value || '').trim());
+  renderSlots(true);         // 立刻收回输入框换成下拉,别等下一轮轮询(焦点还停在表内,轮询守卫会跳过重绘)
+  return ok;
+}
+// 回车直接提交,不必先点走焦点
+function slotModelKey(ev, app, name) {
+  if (ev.key === 'Enter') { ev.preventDefault(); return commitSlotModel(app, name, ev.target.value); }
+  if (ev.key === 'Escape') { slotModelEdit[app] = null; return renderSlots(true); }
+}
+// 失焦提交不依赖 change 事件(有的引擎/输入法不发),只比值有没有真变;没变就只清标记、不重绘——
+// 此刻用户多半正点向别的控件,重绘会把鼠标下的元素换掉、吞掉这次点击,交给下一次轮询(5s)自然收回输入框
+function endSlotModelEdit(app, name, value) {
+  const e = slotModelEdit[app];
+  if (!e || e.name !== name) return;
+  slotModelEdit[app] = null;
+  if (value !== e.value) commitSlotModel(app, name, value);
+}
 const slotsOf = () => state?.slots || { claude: [], codex: [] };
 function slotChannelOptions(sel, group) {
   return '<option value="">(未配置)</option>' + providers(group).map(p => {
@@ -725,15 +755,28 @@ function slotBadge(s, liveRouter) {
 }
 function claudeSlotRow(s) {
   const ch = providers('claude').find(p => p.id === s.provider);
-  const models = (ch && ch.models) || [];
-  // 落点模型是自由输入:渠道清单只当建议(datalist),新模型名直接写进来就能用,
-  // 不必先去渠道弹窗登记——服务端槽位接口只校验字符串,不比对渠道模型表
-  const suggestions = [...new Set([...(s.model ? [s.model] : []), ...models])]
+  const known = [...new Set((ch && ch.models) || [])];
+  const cur = s.model || '';
+  // 落点模型是下拉:渠道模型列表 + 当前值(可能是手写的未登记模型名)+「自定义模型…」。
+  // 不要退回 datalist——Chromium 会按输入框已有内容过滤候选,填了值就只剩那一个,等于没法挑;
+  // 想写渠道清单里没有的模型名,走最后一项切输入框(服务端只校验字符串,不比对渠道模型表)
+  const options = [
+    `<option value="" ${cur ? '' : 'selected'}>（渠道第一个模型）</option>`,
+    ...known.map(m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(m)}</option>`),
+    ...(cur && !known.includes(cur) ? [`<option value="${esc(cur)}" selected>${esc(cur)}（自定义）</option>`] : []),
+    `<option value="${SLOT_MODEL_CUSTOM}">自定义模型…</option>`,
+  ].join('');
+  const suggestions = [...new Set([...(cur ? [cur] : []), ...known])]
     .map(m => `<option value="${esc(m)}"></option>`).join('');
+  const modelCell = !s.provider
+    ? `<select aria-label="${esc(s.name)} 槽模型" disabled><option>（先选渠道）</option></select>`
+    : slotModelEdit.claude?.name === s.name
+      ? `<input type="text" aria-label="${esc(s.name)} 槽模型" list="slot-models-${esc(s.name)}" value="${esc(cur)}" placeholder="模型名，可带 [1M] 后缀" spellcheck="false" autocomplete="off" onkeydown="slotModelKey(event,'claude','${s.name}')" onchange="commitSlotModel('claude','${s.name}',this.value)" onblur="endSlotModelEdit('claude','${s.name}',this.value)"><datalist id="slot-models-${esc(s.name)}">${suggestions}</datalist>`
+      : `<select aria-label="${esc(s.name)} 槽模型" onchange="onSlotModelPick('claude','${s.name}',this.value)">${options}</select>`;
   return `<div class="rc-line">
     <label class="field" style="flex:0 0 auto;min-width:170px">${SLOT_LABELS[s.name] || esc(s.name)}<span class="mono">${esc(s.alias)} · ${esc(s.env || '')}</span></label>
     <label class="field" style="flex:2">渠道<select aria-label="${esc(s.name)} 槽渠道" onchange="setSlot('claude','${s.name}','provider',this.value)">${slotChannelOptions(s.provider, 'claude')}</select></label>
-    <label class="field" style="flex:2">落点模型<input type="text" aria-label="${esc(s.name)} 槽模型" list="slot-models-${esc(s.name)}" value="${esc(s.model || '')}" placeholder="留空=渠道第一个模型；也可直接写模型名" spellcheck="false" autocomplete="off" ${s.provider ? '' : 'disabled'} onchange="setSlot('claude','${s.name}','model',this.value)"><datalist id="slot-models-${esc(s.name)}">${suggestions}</datalist></label>
+    <label class="field" style="flex:2">落点模型${modelCell}</label>
     <span style="align-self:center">${slotBadge(s, !!state.live?.claude?.router)}</span>
     ${s.provider ? `<button class="iconbtn" aria-label="清空 ${esc(s.name)} 槽" onclick="clearSlot('claude','${s.name}')">×</button>` : ''}
   </div>`;
@@ -752,7 +795,7 @@ function renderSlots(force) {
   panel.hidden = false;
   const isClaude = curApp === 'claude';
   $('slots-hint').textContent = isClaude
-    ? '把每个槽位绑定到「渠道 @ 模型」：应用后客户端 env 写入别名（mixr-…），该槽的所有请求——含子代理与后台任务——按槽位落点分发，优先于路由规则。落点模型可直接输入任意模型名（渠道模型列表只作建议）。'
+    ? '把每个槽位绑定到「渠道 @ 模型」：应用后客户端 env 写入别名（mixr-…），该槽的所有请求——含子代理与后台任务——按槽位落点分发，优先于路由规则。落点模型从渠道模型列表里挑，要写渠道没登记的模型名就选「自定义模型…」。'
     : 'Codex 槽位是路由别名：客户端处于路由模式后，codex exec -m mixr-<槽名> 即按槽位落点分发；GET /v1/models 也会列出这些别名。';
   $('slots-apply').hidden = !isClaude;
   $('slots-apply').disabled = !online;

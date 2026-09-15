@@ -351,11 +351,14 @@ test('generated handlers compile safely for quotes, apostrophes, and HTML in pro
   assert.equal(h.get('prov-grid').innerHTML.includes('&lt;script&gt;bad()'), true);
 });
 
-test('槽位落点模型可自由填写:换渠道后建议当场换新渠道的模型,未登记的模型名也照存', async () => {
+test('槽位落点模型是下拉:渠道模型列全可选,换渠道当场换清单,未登记的模型名走「自定义模型…」', async () => {
   const h = await harness();
   h.run("setApp('claude')");
   const before = h.get('slots-rows').innerHTML;
-  assert.match(before, /claude-special/);                 // 渠道模型列表只作建议(datalist)
+  // 必须是 select:datalist 会被 Chromium 按输入框已有内容过滤,填了值就只剩一个候选,等于没法挑
+  assert.match(before, /<select aria-label="main 槽模型" onchange="onSlotModelPick\('claude','main',this\.value\)">/);
+  assert.match(before, /<option value="claude-special" selected>claude-special<\/option>/);
+  assert.match(before, /<option value="__custom__">自定义模型…<\/option>/);
   assert.doesNotMatch(before, /claude-old/);
   // 用户刚在渠道 select 里选完新渠道,焦点还停在槽位表内:轮询守卫本会跳过重绘,用户提交的改动必须绕过它
   h.run("globalThis.__sel = new document.body.constructor('f', 'select'); __sel.setAttribute('aria-label', 'main 槽渠道'); __sel.parentElement = document.getElementById('slots-rows'); __sel.focus();");
@@ -363,14 +366,31 @@ test('槽位落点模型可自由填写:换渠道后建议当场换新渠道的�
   await h.run("setSlot('claude', 'main', 'provider', 'a2')");
   const after = h.get('slots-rows').innerHTML;
   assert.match(after, /value="a2"/);
-  assert.match(after, /claude-old/);
+  assert.match(after, /<option value="claude-old" selected>claude-old<\/option>/);  // 落点模型跟着新渠道的清单走
   assert.doesNotMatch(after, /claude-special/);
-  // 落点模型是输入框而非下拉:渠道清单里没有的模型名也能直接写进去并提交
+  assert.match(after, /<select aria-label="subagent 槽模型" disabled><option>（先选渠道）<\/option><\/select>/);
+  // 渠道清单里没有的模型名:选「自定义模型…」切输入框后照样能提交
   // (夹具的 /api/state 是静态的,refresh 会把槽位表还原成初始值,所以这里只断言提交内容)
-  await h.run("setSlot('claude', 'main', 'model', 'brand-new-model')");
+  h.run("onSlotModelPick('claude','main','__custom__')");
+  assert.match(h.get('slots-rows').innerHTML, /<input type="text" aria-label="main 槽模型" list="slot-models-main" value="claude-special"/);
+  h.run("slotModelKey({ key: 'Escape', target: {} }, 'claude', 'main')");
+  assert.equal(h.run('slotModelEdit.claude'), null);
+  assert.match(h.get('slots-rows').innerHTML, /<select aria-label="main 槽模型"/, 'Esc 退出输入框,回到下拉');
+  h.run("onSlotModelPick('claude','main','__custom__')");
+  await h.run("slotModelKey({ key: 'Enter', preventDefault() {}, target: { value: 'brand-new-model' } }, 'claude', 'main')");
   const put = h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/slots');
   assert.equal(put.body.claude.main.model, 'brand-new-model');
   assert.equal(typeof put.body.claude.main.provider, 'string');
+  assert.equal(h.run('slotModelEdit.claude'), null, '提交后回到下拉,不再停在输入框');
+  // 失焦提交不依赖 change 事件:值变了才提交,没变就只清标记,不写盘
+  const putCount = () => h.requests.filter(r => r.method === 'PUT' && r.url === '/api/slots').length;
+  const putBefore = putCount();
+  h.run("onSlotModelPick('claude','main','__custom__')");
+  h.run("endSlotModelEdit('claude','main', slotModelEdit.claude.value)");        // 原样失焦
+  assert.equal(putCount(), putBefore, '没改就不写盘');
+  h.run("onSlotModelPick('claude','main','__custom__')");
+  await h.run("endSlotModelEdit('claude','main','second-new-model')");
+  assert.equal(h.requests.findLast(r => r.method === 'PUT' && r.url === '/api/slots').body.claude.main.model, 'second-new-model');
 });
 
 test('渠道弹窗不再带模型映射:保存只提交模型列表,不再写渠道级槽位', async () => {
