@@ -145,6 +145,41 @@ test('responsesToAnthropic:文本 + function_call → tool_use,usage 带上', ()
   assert.deepStrictEqual(msg.usage, { input_tokens: 60, output_tokens: 20, cache_read_input_tokens: 40 });
 });
 
+test('anthropicToResponses:上游恒流式,客户端 stream:false 也不透传非流形状', () => {
+  // 非流上游要等整篇生成完才发响应头,大上下文压缩类请求会稳定撞首字节超时再被客户端
+  // 重试、上游照常计费——这是 requests.jsonl 里 123 发 502 死循环的根因,必须恒 stream:true
+  assert.strictEqual(wire.anthropicToResponses({ model: 'm', messages: [] }, {}).stream, true);
+  assert.strictEqual(wire.anthropicToResponses({ model: 'm', stream: false, messages: [] }, {}).stream, true);
+  assert.strictEqual(wire.anthropicToResponses({ model: 'm', stream: true, messages: [] }, {}).stream, true);
+});
+
+test('collectAnthropicMessage:整段 SSE 重建为非流整包,usage 以 message_delta 终态为准', () => {
+  const frames = [
+    { type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'gpt-6-astra', content: [], usage: { input_tokens: 0, output_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '前半' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '后半' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"cmd":"ls"}' } },
+    { type: 'content_block_stop', index: 1 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { input_tokens: 18, output_tokens: 7, cache_read_input_tokens: 3 } },
+    { type: 'message_stop' },
+  ];
+  const text = frames.map(ev => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join('');
+  const msg = wire.collectAnthropicMessage(text);
+  assert.strictEqual(msg.id, 'msg_1');
+  assert.strictEqual(msg.model, 'gpt-6-astra');
+  assert.strictEqual(msg.content[0].text, '前半后半');       // delta 逐段累积
+  assert.deepStrictEqual(msg.content[1], { type: 'tool_use', id: 'tu_1', name: 'Bash', input: { cmd: 'ls' } });
+  assert.strictEqual(msg.stop_reason, 'tool_use');
+  // message_start 的 usage:0 必须被 message_delta 的终态值盖掉
+  assert.deepStrictEqual(msg.usage, { input_tokens: 18, output_tokens: 7, cache_read_input_tokens: 3 });
+  // CRLF 分帧与注释行(上游心跳)不影响解析
+  const crlf = text.replace(/\n/g, '\r\n') + ': keep-alive\r\n\r\n';
+  assert.strictEqual(wire.collectAnthropicMessage(crlf).usage.input_tokens, 18);
+});
+
 // ---------------------------------------------------------------- 端到端
 function createResponsesUpstream() {
   const requests = [];
@@ -269,7 +304,11 @@ test('非流式:messages 翻成 responses 发上游,响应翻回 Anthropic', asy
   const j = JSON.parse(r.text);
   assert.strictEqual(j.type, 'message');
   assert.strictEqual(j.content[0].text, 'conv-echo:gpt-6-astra');
-  assert.strictEqual(j.usage.input_tokens, 21);
+  // 上游恒流式(非流死循环治理):非流客户端收到的是攒出来的整包,usage 与流式同口径——
+  // input 已扣缓存命中(21-3),cache_read 单独给(与上面 responsesToAnthropic 的单测一致)
+  assert.strictEqual(j.usage.input_tokens, 18);
+  assert.strictEqual(j.usage.cache_read_input_tokens, 3);
+  assert.strictEqual(j.usage.output_tokens, 7);
   assert.strictEqual(r.headers['x-mixrouter-provider'], 'astra');      // 渠道名经 safeHeader 只留 ASCII
 });
 

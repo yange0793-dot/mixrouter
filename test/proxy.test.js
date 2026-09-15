@@ -432,3 +432,26 @@ test('被「手动改绑」的会话不劫持槽位请求', async () => {
   mod._state.sessions.delete('cc:slotpin1');
   await rawRequest(uiPort, 'DELETE', `/api/providers/${slotId}`);
 });
+
+test('非流客户端直通:上游收到 stream:true,客户端收到攒出来的整包 JSON + 终态 usage', async () => {
+  const r = await rawRequest(proxyPort, 'POST', '/v1/messages', {
+    body: { model: 'claude-opus-5', max_tokens: 8, stream: false, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert.strictEqual(r.status, 200);
+  assert.ok(r.headers['content-type'].includes('application/json'), '非流客户端收整包 JSON,不是 SSE');
+  const j = JSON.parse(r.text);
+  assert.strictEqual(j.type, 'message');
+  assert.strictEqual(j.content[0].text, 'mock-echo:routed-opus');
+  assert.strictEqual(j.stop_reason, 'end_turn');
+  // usage 与流式同口径:message_start 的 0 被 message_delta 的终态值盖掉
+  assert.deepStrictEqual(j.usage, { input_tokens: 17, output_tokens: 9, cache_read_input_tokens: 5 });
+  // 上游侧必须收到流式请求:非流形状透传给上游 = 大上下文压缩请求撞首字节超时的死循环
+  assert.strictEqual(mock.requests.at(-1).body.stream, true);
+  const logs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs')).text);
+  const entry = logs.logs[0];
+  assert.strictEqual(entry.in, 17, '攒包路径的 usage 要落进请求日志');
+  assert.strictEqual(entry.out, 9);
+  assert.strictEqual(entry.cache_read, 5);
+  assert.strictEqual(entry.status, 200);
+  assert.strictEqual(entry.err, '');
+});

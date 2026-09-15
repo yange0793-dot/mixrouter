@@ -24,7 +24,7 @@ const zcodeConfig = require('./lib/zcode-config');
 const wireResponses = require('./lib/wire-responses');
 const { upstreamAgent } = require('./lib/upstream-proxy');
 
-const VERSION = '3.5.1';
+const VERSION = '3.5.2';
 const ROOT = __dirname;
 // 运行时数据(providers/routes/logs)目录可整体重定向(MIXR_DATA_DIR),测试用,避免碰真实配置
 const DATA_DIR = process.env.MIXR_DATA_DIR || ROOT;
@@ -830,11 +830,13 @@ function validBaseUrl(u) {
 
 // 从 SSE/JSON 响应文本里尽力抠 usage(输入来自 message_start,输出来自 message_delta)
 function extractUsage(text) {
-  const u = { in: 0, out: 0, cache_read: 0 };
-  const input = text.match(/"input_tokens"\s*:\s*(\d+)/); if (input) u.in = Number(input[1]);
-  const out = text.match(/"output_tokens"\s*:\s*(\d+)/); if (out) u.out = Number(out[1]);
-  const cr = text.match(/"cache_read_input_tokens"\s*:\s*(\d+)/); if (cr) u.cache_read = Number(cr[1]);
-  return u;
+  // 三个字段一律取最后一次出现:Anthropic 系网关的 message_start 常给 usage:0,真值在流末尾的
+  // message_delta——首匹配抠到 0,glm-5.3 直通 677/692 条 in/out 全 0 就是这么丢的
+  return {
+    in: lastNum(text, /"input_tokens"\s*:\s*(\d+)/),
+    out: lastNum(text, /"output_tokens"\s*:\s*(\d+)/),
+    cache_read: lastNum(text, /"cache_read_input_tokens"\s*:\s*(\d+)/),
+  };
 }
 
 // 取文本里该字段"最后一次"出现的值(OpenAI 系的 usage 在流的末尾才齐;中途事件可能带旧值)
@@ -1289,7 +1291,13 @@ function proxyHandler(req, res) {
         });
         return res.end(JSON.stringify({ input_tokens: entry.in }));
       }
-      const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, body.stream !== false);
+      // 发往上游的请求形状:anthropic 直通与两条翻译线(conv 在转换层写死、chat 桥在
+      // responsesToChat 里写死)一律转成流式——非流上游要等整篇生成完才发响应头,大上下文
+      // 压缩类请求(Claude Code 的 auto-compact 正是非流+全量历史)会稳定撞首字节超时再被
+      // 客户端重试,而上游照常跑完照常扣费,requests.jsonl 里 123 发全挂在首字节超时就是这么
+      // 来的。responses/chat 直通维持客户端原形状。
+      const upstreamStream = (wire === 'anthropic' || conv || (wire === 'chat' && ep.kind === 'responses')) ? true : !!body.stream;
+      const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, upstreamStream);
       // [1M] 后缀与 beta 头只对 Anthropic 上游有意义;Responses 上游收的是裸名
       const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : wireResponses.stripModelSuffix(member.model || modelIn);
       const convKey = conv ? convCacheKey(sessKey, provider.id, convCacheGen(sessKey, provider.id)) : '';
@@ -1299,6 +1307,8 @@ function proxyHandler(req, res) {
         ? JSON.stringify(responsesToChat({ ...body, model }, provider))
         : conv
         ? JSON.stringify(wireResponses.anthropicToResponses({ ...body, model }, { promptCacheKey: convKey }))
+        : wire === 'anthropic'
+        ? JSON.stringify({ ...body, model, stream: true }) // 见 upstreamStream 注释:非流客户端由响应侧攒整包回
         : JSON.stringify({ ...body, model });
       entry.attempts = i + 1;
       entry.provider = provider.name;
@@ -1308,8 +1318,9 @@ function proxyHandler(req, res) {
       const upstream = new URL(provider.base_url);
       const transport = upstream.protocol === 'https:' ? https : http;
       let done = false;
-      // 本次尝试等响应头的预算:流式请求上游一接受就发头,给短预算;非流式要等整篇生成完
-      const firstHeaderMs = firstHeaderTimeoutFor(!!body.stream);
+      // 本次尝试等响应头的预算:按发往上游的形状算(见 upstreamStream)——恒流式后上游一
+      // 接受就发头,给短预算即可;「等整篇生成完才发头」的形状只剩 responses/chat 直通才有可能
+      const firstHeaderMs = firstHeaderTimeoutFor(upstreamStream);
       // 还有后备渠道时,把这次失败记到冷却里再换下一个
       const nextOrFail = (reason, errMsg, errClass) => {
         // 客户端已断开:重试没有意义,也别把取消算成渠道失败
@@ -1379,18 +1390,22 @@ function proxyHandler(req, res) {
         // 端到端总 deadline:从客户端请求到达起算,**流式也一样管**。以前流式只有"字节间空闲"
         // 一条约束,慢慢滴的流能一直拖着;而客户端 300s 早就放弃了,我们还在替一条没人接收的
         // 响应占着上游连接和渠道额度。这里是整个预算的最外层。
-        const deadlineTimer = TOTAL_DEADLINE_MS ? setTimeout(() => {
+        // 预算随请求体放大:大上下文压缩请求上游实测 224~286s 才跑完,固定 240s 掐断时上游
+        // 照样计费(渠道面板实测每发 $0.94~0.99),等于白烧。按体积≈每 token 放 2ms、封顶
+        // 再加 10 分钟;客户端真断开由 res.on('close') 立刻掐,放宽不会替没人接收的请求烧额度。
+        const deadlineMs = TOTAL_DEADLINE_MS + Math.min(600000, Math.ceil(rawLen / 4) * 2);
+        const deadlineTimer = deadlineMs ? setTimeout(() => {
           if (responseDone || convRetrying) return;
           deadlineHit = true;
           // 先把自己钉进日志:后面 relay / upstreamDead 的收尾都用 || 兜底,不会覆盖真实原因
-          entry.err = entry.err || `超出端到端总预算(${Math.round(TOTAL_DEADLINE_MS / 1000)}s)`;
+          entry.err = entry.err || `超出端到端总预算(${Math.round(deadlineMs / 1000)}s)`;
           entry.err_class = entry.err_class || 'timeout';
           try { cres.destroy(new Error('timeout: 端到端总预算用尽')); } catch {}
           // 还没提交给客户端就直接给一条明确的 504,别让它耗到自己的本地超时
           if (!res.headersSent) {
             upstreamDead(entry.err, 'timeout', { status: 504, message: '超出端到端总预算' });
           }
-        }, Math.max(1, TOTAL_DEADLINE_MS - (Date.now() - started))) : null;
+        }, Math.max(1, deadlineMs - (Date.now() - started))) : null;
         // 看门狗只是兜底,不该成为"进程还不能退出"的理由(测试里漏清就会挂满整个总预算)
         if (bodyTimer && bodyTimer.unref) bodyTimer.unref();
         if (deadlineTimer && deadlineTimer.unref) deadlineTimer.unref();
@@ -1511,9 +1526,12 @@ function proxyHandler(req, res) {
             return;
           }
           if (isSse) {
-            wireResponses.relayAnthropicStream(cres, res, model, {
+            // 客户端要非流:上游照发流式,收进内存攒成整包 JSON 再回(见 upstreamStream 注释)。
+            // 心跳注释绝不能开:攒包期间真 res 还没写头,塞进一个字节就把非流响应毁了
+            const sink = body.stream ? null : wireResponses.memorySink();
+            wireResponses.relayAnthropicStream(cres, sink ? sink.res : res, model, {
               mayRetry: !res.headersSent && convRetries < CONV_RETRIES, headers: outHeaders,
-              onCommit: startKeepAlive, // 真提交给客户端了,从这一刻起补心跳
+              onCommit: body.stream ? startKeepAlive : null, // 真提交给客户端了,从这一刻起补心跳
             }).then(r => {
               // 客户端已经走了就别再换 key 重打一遍:那是在为没人接收的请求烧渠道额度
               if (r && r.retryable && !clientClosed && !res.destroyed && !deadlineHit) {
@@ -1533,6 +1551,24 @@ function proxyHandler(req, res) {
                 in: u.input_tokens || 0, out: u.output_tokens || 0,
                 cache_read: u.cache_read_input_tokens || 0,
               });
+              // 非流客户端:攒下的流重建为整包 message 回去。失败时真 res 还没写过任何字节,
+              // 在这里直接给一条干净的错误 JSON;干等下去客户端只会撞自己的本地超时
+              if (sink && !res.headersSent && !clientClosed) {
+                if (r && !r.aborted) {
+                  let msg = null;
+                  try { msg = wireResponses.collectAnthropicMessage(sink.text()); } catch { /* 解析不了就透传原文 */ }
+                  if (msg) {
+                    res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
+                    try { return res.end(JSON.stringify(msg)); } catch { return; }
+                  }
+                  try { res.writeHead(cres.statusCode, { ...outHeaders, 'Content-Type': 'application/json' }); res.end(sink.text() || '{}'); } catch {}
+                } else {
+                  try {
+                    res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: (r && r.detail) || '上游流中断' } }));
+                  } catch {}
+                }
+              }
             });
             return;
           }
@@ -1568,6 +1604,26 @@ function proxyHandler(req, res) {
           return;
         }
         // 同协议直通:Anthropic→Anthropic / responses→responses / chat→chat
+        // anthropic 线上游恒流式(见 upstreamStream 注释):客户端要非流时收进内存攒成整包
+        // JSON 再回,而不是把非流形状透传给上游吃那 120s 首字节死循环
+        if (wire === 'anthropic' && !body.stream && isSse) {
+          const sink = wireResponses.memorySink();
+          cres.on('data', c => sink.res.write(c));
+          cres.on('end', () => {
+            let msg = null;
+            try { msg = wireResponses.collectAnthropicMessage(sink.text()); } catch { /* 上游 SSE 解析不了,按原文透传 */ }
+            const u = (msg && msg.usage) || {};
+            finishEntry({ in: u.input_tokens || 0, out: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0 });
+            if (res.headersSent) return;
+            if (msg) {
+              res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
+              return res.end(JSON.stringify(msg));
+            }
+            res.writeHead(cres.statusCode, outHeaders);
+            res.end(sink.text());
+          });
+          return;
+        }
         res.writeHead(cres.statusCode, outHeaders);
         // 到这一步客户端那条响应已经提交,可以开始补心跳了
         if (isSse) startKeepAlive();

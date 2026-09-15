@@ -17,7 +17,9 @@ process.env.MIXR_COOLDOWN_SEC = '60';
 process.env.MIXR_MAX_ATTEMPTS = '3';
 process.env.MIXR_CONV_RETRIES = '3';
 // 三段超时都压到亚秒级,让"上游发完头就装死"这类场景在测试里可复现
+// 流式首字节也要设:上游恒流式(非流死循环治理)后,非流客户端的请求同样按流式首字节预算算
 process.env.MIXR_FIRST_HEADER_TIMEOUT_MS = '1200';
+process.env.MIXR_STREAM_FIRST_HEADER_TIMEOUT_MS = '1200';
 process.env.MIXR_STREAM_IDLE_TIMEOUT_MS = '600';
 process.env.MIXR_NONSTREAM_TOTAL_TIMEOUT_MS = '800';
 process.env.MIXR_BREAKER_FAILURE_THRESHOLD = '3';

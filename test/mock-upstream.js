@@ -31,11 +31,13 @@ function createMockUpstream() {
       if (body.stream) {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         const send = ev => res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
-        send({ type: 'message_start', message: { id: 'msg_mock', type: 'message', role: 'assistant', model, usage: { input_tokens: 17, cache_read_input_tokens: 5 } } });
+        // message_start 的 usage 给 0、真值全放 message_delta:贴近 glm-5.3 这类网关的真实形状,
+        // 钉住"抠 usage 必须取最后一次出现"(首匹配会把 17/9/5 全抠成 0)
+        send({ type: 'message_start', message: { id: 'msg_mock', type: 'message', role: 'assistant', model, usage: { input_tokens: 0, output_tokens: 0 } } });
         send({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
         send({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `mock-echo:${model}` } });
         send({ type: 'content_block_stop', index: 0 });
-        send({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 9 } });
+        send({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 17, output_tokens: 9, cache_read_input_tokens: 5 } });
         send({ type: 'message_stop' });
         return res.end();
       }
