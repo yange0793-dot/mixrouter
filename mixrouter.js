@@ -1296,7 +1296,7 @@ function proxyHandler(req, res) {
       // 压缩类请求(Claude Code 的 auto-compact 正是非流+全量历史)会稳定撞首字节超时再被
       // 客户端重试,而上游照常跑完照常扣费,requests.jsonl 里 123 发全挂在首字节超时就是这么
       // 来的。responses/chat 直通维持客户端原形状。
-      const upstreamStream = (wire === 'anthropic' || conv || (wire === 'chat' && ep.kind === 'responses')) ? true : !!body.stream;
+      const upstreamStream = ((wire === 'anthropic' && ep.kind === 'messages') || conv || (wire === 'chat' && ep.kind === 'responses')) ? true : !!body.stream;
       const headers = wire === 'anthropic' ? buildUpstreamHeaders(provider, req) : buildOpenAiHeaders(provider, req, upstreamStream);
       // [1M] 后缀与 beta 头只对 Anthropic 上游有意义;Responses 上游收的是裸名
       const model = wire === 'anthropic' ? applyModel(member.model || modelIn, headers) : wireResponses.stripModelSuffix(member.model || modelIn);
@@ -1307,7 +1307,7 @@ function proxyHandler(req, res) {
         ? JSON.stringify(responsesToChat({ ...body, model }, provider))
         : conv
         ? JSON.stringify(wireResponses.anthropicToResponses({ ...body, model }, { promptCacheKey: convKey }))
-        : wire === 'anthropic'
+        : wire === 'anthropic' && ep.kind === 'messages'
         ? JSON.stringify({ ...body, model, stream: true }) // 见 upstreamStream 注释:非流客户端由响应侧攒整包回
         : JSON.stringify({ ...body, model });
       entry.attempts = i + 1;
@@ -1547,27 +1547,31 @@ function proxyHandler(req, res) {
                 entry.err_class = entry.err_class || 'stream_aborted';
               }
               const u = (r && r.usage) || {};
+              let msg = null, parseError = null;
+              if (sink && r && !r.aborted) {
+                try { msg = wireResponses.collectAnthropicMessage(sink.text()); }
+                catch (e) { parseError = e; }
+              }
+              if (sink && (parseError || (r && r.aborted))) {
+                entry.status = 502;
+                entry.err = entry.err || (parseError && parseError.message) || (r && r.detail) || '上游流中断';
+                entry.err_class = entry.err_class || 'stream_aborted';
+              }
               finishEntry({
                 in: u.input_tokens || 0, out: u.output_tokens || 0,
                 cache_read: u.cache_read_input_tokens || 0,
               });
-              // 非流客户端:攒下的流重建为整包 message 回去。失败时真 res 还没写过任何字节,
-              // 在这里直接给一条干净的错误 JSON;干等下去客户端只会撞自己的本地超时
+              // 非流客户端:攒下的流只有在完整终态可重建时才回 200;断流、错误事件或损坏的
+              // 工具参数统一回 502,不能把残缺 SSE 伪装成成功 JSON。
               if (sink && !res.headersSent && !clientClosed) {
-                if (r && !r.aborted) {
-                  let msg = null;
-                  try { msg = wireResponses.collectAnthropicMessage(sink.text()); } catch { /* 解析不了就透传原文 */ }
-                  if (msg) {
-                    res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
-                    try { return res.end(JSON.stringify(msg)); } catch { return; }
-                  }
-                  try { res.writeHead(cres.statusCode, { ...outHeaders, 'Content-Type': 'application/json' }); res.end(sink.text() || '{}'); } catch {}
-                } else {
-                  try {
-                    res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: (r && r.detail) || '上游流中断' } }));
-                  } catch {}
+                if (msg) {
+                  res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
+                  try { return res.end(JSON.stringify(msg)); } catch { return; }
                 }
+                try {
+                  res.writeHead(502, { ...outHeaders, 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: entry.err || '上游流中断' } }));
+                } catch {}
               }
             });
             return;
@@ -1610,17 +1614,22 @@ function proxyHandler(req, res) {
           const sink = wireResponses.memorySink();
           cres.on('data', c => sink.res.write(c));
           cres.on('end', () => {
-            let msg = null;
-            try { msg = wireResponses.collectAnthropicMessage(sink.text()); } catch { /* 上游 SSE 解析不了,按原文透传 */ }
+            let msg = null, parseError = null;
+            try { msg = wireResponses.collectAnthropicMessage(sink.text()); }
+            catch (e) { parseError = e; }
             const u = (msg && msg.usage) || {};
+            if (parseError) {
+              entry.status = 502;
+              entry.err = parseError.message;
+              entry.err_class = 'stream_aborted';
+            }
             finishEntry({ in: u.input_tokens || 0, out: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0 });
             if (res.headersSent) return;
             if (msg) {
               res.writeHead(200, { ...outHeaders, 'Content-Type': 'application/json' });
               return res.end(JSON.stringify(msg));
             }
-            res.writeHead(cres.statusCode, outHeaders);
-            res.end(sink.text());
+            sendErr(502, 'api_error', `上游 ${provider.name} 响应中断: ${entry.err || '缺少完整终态'}`, 'stream_aborted');
           });
           return;
         }

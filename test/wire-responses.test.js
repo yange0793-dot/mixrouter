@@ -178,6 +178,13 @@ test('collectAnthropicMessage:整段 SSE 重建为非流整包,usage 以 message
   // CRLF 分帧与注释行(上游心跳)不影响解析
   const crlf = text.replace(/\n/g, '\r\n') + ': keep-alive\r\n\r\n';
   assert.strictEqual(wire.collectAnthropicMessage(crlf).usage.input_tokens, 18);
+  assert.throws(() => wire.collectAnthropicMessage(text.replace(/event: message_stop[\s\S]*$/, '')), /完整终态/);
+  const truncated = frames.map(ev => (ev.type === 'content_block_delta' && ev.index === 1)
+    ? `event: ${ev.type}\ndata: ${JSON.stringify({ ...ev, delta: { ...ev.delta, partial_json: '{"cmd":' } })}\n\n`
+    : `event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`).join('');
+  assert.throws(() => wire.collectAnthropicMessage(truncated), /工具参数/);
+  const errorText = `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'broken' } })}\n\n`;
+  assert.throws(() => wire.collectAnthropicMessage(errorText), /broken/);
 });
 
 // ---------------------------------------------------------------- 端到端

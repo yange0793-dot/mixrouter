@@ -150,6 +150,7 @@ test('count_tokens:转发到上游专用路径,usage 数值类型正确', async 
   });
   assert.strictEqual(r.status, 200);
   assert.ok(mock.requests.at(-1).url.includes('/v1/messages/count_tokens'));
+  assert.ok(!Object.hasOwn(mock.requests.at(-1).body, 'stream'), 'count_tokens 请求不能注入 messages 专用的 stream 字段');
   assert.strictEqual(JSON.parse(r.text).input_tokens, 42);
   const logs = JSON.parse((await rawRequest(uiPort, 'GET', '/api/logs')).text);
   assert.strictEqual(logs.logs[0].kind, 'count_tokens');
